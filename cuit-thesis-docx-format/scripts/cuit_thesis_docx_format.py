@@ -317,6 +317,8 @@ SECTION_ORDER = {
     "acknowledgement": 8,
 }
 
+SECTION_SEQUENCE = ["cover", "declaration", "abstract", "toc", "symbols", "body", "references", "appendix", "acknowledgement"]
+
 SECTION_LABELS = {
     "cover": "封面",
     "declaration": "封二",
@@ -328,6 +330,10 @@ SECTION_LABELS = {
     "appendix": "附录",
     "acknowledgement": "致谢",
 }
+
+
+def section_module_name(marker: str) -> str:
+    return "abstract" if marker in {"abstract_zh", "abstract_en"} else marker
 
 
 def compact_text(text: str) -> str:
@@ -445,6 +451,40 @@ def analyze_section_sequence(texts: list[str], has_toc_field: bool = False) -> d
     }
 
 
+def compute_section_boundary_findings(texts: list[str], regions: list[str]) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    entered_modules: set[str] = {"cover"}
+    ended_modules: set[str] = set()
+    current_module = "cover"
+    for idx, text in enumerate(texts):
+        stripped = text.strip()
+        if not stripped:
+            continue
+        marker = detect_section_marker(stripped)
+        if marker is not None:
+            marker_module = section_module_name(marker)
+            region_module = section_module_name(regions[idx]) if idx < len(regions) else current_module
+            marker_order = SECTION_SEQUENCE.index(marker_module) if marker_module in SECTION_SEQUENCE else -1
+            current_order = SECTION_SEQUENCE.index(current_module) if current_module in SECTION_SEQUENCE else -1
+            if marker_order != -1 and current_order != -1 and marker_order < current_order:
+                errors.append(
+                    f"结构错误：段落 {idx} 出现“{stripped[:40]}”，疑似{SECTION_LABELS.get(marker_module, marker_module)}错位；当前已进入{SECTION_LABELS.get(current_module, current_module)}。"
+                )
+            if marker_module != current_module:
+                ended_modules.add(current_module)
+                if marker_module in ended_modules:
+                    errors.append(f"结构错误：段落 {idx} 再次进入“{SECTION_LABELS.get(marker_module, marker_module)}”模块。")
+                if marker_module in entered_modules and marker_module != "abstract":
+                    errors.append(f"结构错误：段落 {idx} 检测到模块重复出现：{SECTION_LABELS.get(marker_module, marker_module)}。")
+                entered_modules.add(marker_module)
+                current_module = region_module if region_module in SECTION_SEQUENCE else marker_module
+        compact = compact_text(stripped)
+        if ("浣滆€呯畝鍘?" in compact or "鏀昏瀛︿綅鏈熼棿鍙戣〃" in compact) and current_module != "appendix":
+            warnings.append("检测到九大模块之外的疑似额外组成部分，需要人工确认。")
+    return errors, warnings
+
+
 def detect_abstract_thesis_titles(texts: list[str]) -> dict[int, str]:
     title_rules: dict[int, str] = {}
     previous_nonempty: int | None = None
@@ -478,11 +518,25 @@ def style_heading_key(paragraph, region: str) -> str | None:
 
 def classify_checked_paragraph(paragraph, idx: int, text: str, region: str, title_overrides: dict[int, str]) -> str | None:
     style_name = (paragraph.style.name if paragraph.style else "").lower()
-    if style_name.startswith("toc") and text.replace(" ", "") != "目录":
+    if style_name.startswith("toc") and section_module_name(detect_section_marker(text) or "") != "toc":
         return "toc_level3" if style_name.endswith("3") else "toc_level2" if style_name.endswith("2") else "toc_level1"
-    return title_overrides.get(idx) or style_heading_key(paragraph, region) or classify_paragraph(text, in_body=region == "body", region=region)
-
-
+    key = title_overrides.get(idx) or style_heading_key(paragraph, region) or classify_paragraph(text, in_body=region == "body", region=region)
+    if key is None:
+        return None
+    region_scopes: dict[str, set[str]] = {
+        "cover": {"cover_title_zh", "cover_title_en", "cover_field_zh", "cover_field_en", "cover_date", "thesis_title_zh", "thesis_title_en"},
+        "declaration": set(),
+        "abstract_zh": {"abstract_title_zh", "abstract_body_zh", "keywords", "keywords_zh", "thesis_title_zh"},
+        "abstract_en": {"abstract_title_en", "abstract_body_en", "keywords", "keywords_en", "thesis_title_en"},
+        "toc": {"toc_title", "toc_total_pages", "toc_level1", "toc_level2", "toc_level3"},
+        "symbols": {"symbols_title", "symbols_body"},
+        "body": {"chapter", "heading2", "heading3", "body", "figure_caption", "table_caption", "formula"},
+        "references": {"reference_title", "reference_entry"},
+        "appendix": {"appendix_title", "appendix_body"},
+        "acknowledgement": {"acknowledgement_title", "acknowledgement_body"},
+    }
+    allowed = region_scopes.get(region, set())
+    return key if key in allowed else None
 def classify_paragraph(text: str, in_body: bool, region: str = "front") -> str | None:
     compact = compact_text(text)
     if re.match(r"^论文总页数[:：]\s*\d+\s*页", text):
@@ -1222,7 +1276,7 @@ def apply_page_number_formats(document: Document) -> None:
             or bool(re.search(r"\.{6,}", sec_text))
             or ("论文总页数" in sec_text)
         )
-        if {"abstract_zh", "abstract_en", "toc"} & section_regions:
+        if {"declaration", "abstract_zh", "abstract_en", "toc"} & section_regions:
             abstract_or_toc_sections.append(section_idx)
         elif looks_like_toc_section:
             abstract_or_toc_sections.append(section_idx)
@@ -1447,7 +1501,7 @@ def _section_page_kinds(document: Document, regions: list[str]) -> list[str | No
     for section_idx, _section in enumerate(document.sections):
         start, end = ranges[section_idx] if section_idx < len(ranges) else (0, -1)
         section_regions = set(regions[start : end + 1]) if start <= end else set()
-        if {"abstract_zh", "abstract_en", "toc"} & section_regions:
+        if {"declaration", "abstract_zh", "abstract_en", "toc"} & section_regions:
             kinds.append("front")
         elif {"body", "references", "appendix", "acknowledgement"} & section_regions:
             kinds.append("main")
@@ -1459,7 +1513,20 @@ def _section_page_kinds(document: Document, regions: list[str]) -> list[str | No
 def collect_section_issues(document: Document) -> list[Issue]:
     issues: list[Issue] = []
     texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
-    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    structure = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))
+    regions = structure["regions"]
+    boundary_errors, _boundary_warnings = compute_section_boundary_findings(texts, regions)
+    for item in boundary_errors:
+        issues.append(
+            _issue_global(
+                "section_sequence",
+                "thesis section sequence",
+                str(item),
+                "九大模块必须按固定顺序且不重复：cover->declaration->abstract->toc->symbols->body->references->appendix->acknowledgement。",
+                "structure",
+                "document structure",
+            )
+        )
     section_page_kinds = _section_page_kinds(document, regions)
     header_start, header_reason = find_header_start_section(document)
     if header_reason == "not-found":
@@ -2838,6 +2905,8 @@ def run(
         advisory.append(
             "The fixed DOCX was produced through OOXML fallback. Render QA images are approximate previews and may not match Microsoft Word or WPS exactly; use Word/WPS for final visual confirmation when possible."
         )
+        advisory.append("由于未使用 Word/WPS COM，页码与分页检查为有限检查/报告型检查。")
+        advisory.append("纯 OOXML 模式不能完全确认渲染后的封面第一页边界；当前按文档开头至后续模块标记之前作为封面逻辑区域，请用 Word/WPS 复核。")
     if fixed_renderer == "ooxml" and not allow_ooxml_layout_fixes:
         advisory.append(
             "OOXML mode did not automatically modify high-risk layout features: headers, footers, page numbers, header/footer distance, or section-start behavior. Add --allow-ooxml-layout-fixes only if the user explicitly accepts possible pagination drift."
@@ -2864,7 +2933,7 @@ def run(
         "screenshot_status": screenshot_status,
         "render_qa": render_qa,
         "structure_analysis": structure_analysis,
-        "structure_warnings": structure_analysis["warnings"],
+        "structure_warnings": structure_analysis.get("warnings", []) + compute_section_boundary_findings(source_texts, structure_analysis["regions"])[0] + compute_section_boundary_findings(source_texts, structure_analysis["regions"])[1],
         "issues": [issue_dict(issue) for issue in issues],
         "unsupported_or_advisory": advisory,
     }
