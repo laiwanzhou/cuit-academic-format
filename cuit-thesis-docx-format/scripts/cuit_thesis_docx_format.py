@@ -194,7 +194,7 @@ RULES: dict[str, Rule] = {
         first_line_indent_chars=0,
         space_before_lines=0,
         space_after_lines=1,
-        expected="图题置于图下方，宋体五号10.5pt，居中，固定20磅行距，图序与图名之间空一格。",
+        expected="图序、图名、图注：宋体五号10.5pt，居中，固定20磅行距，段前0行，段后1行，置于图下方，图序与图名之间空一格。",
     ),
     "table_caption": Rule(
         "table_caption",
@@ -207,7 +207,7 @@ RULES: dict[str, Rule] = {
         first_line_indent_chars=0,
         space_before_lines=1,
         space_after_lines=0,
-        expected="表题置于表上方，宋体五号10.5pt，居中，固定20磅行距，表序与表名之间空一格。",
+        expected="表序、表名、表注：宋体五号10.5pt，居中，固定20磅行距，段前1行，段后0行，置于表上方，表序与表名之间空一格。",
     ),
     "abstract_title_zh": Rule(
         "abstract_title_zh",
@@ -1949,17 +1949,17 @@ def collect_reference_issues(document: Document) -> list[Issue]:
         if marker is None:
             issues.append(_issue_global("reference_type_marker", "reference entry", "缺少文献类型标识（如[M]/[J]/[D]/[EB/OL]）。", "应包含类型标识并符合规范2.7.2和2.7.3。", "references", f"paragraph {idx}", text[:120]))
         else:
-            if marker == "J" and (re.search(r"(19|20)\d{2}", text) is None or (re.search(r"\d+\s*[:?]\s*\d+", text) is None and re.search(r"\d+[-?]\d+", text) is None)):
+            if marker == "J" and (re.search(r"(19|20)\d{2}", text) is None or (re.search(r"\d+\s*[:：]\s*\d+", text) is None and re.search(r"\d+[-–]\d+", text) is None)):
                 issues.append(_issue_global("reference_entry_format", "reference entry", "期刊文献[J]疑似缺少年份或卷期/页码。", "期刊文献应包含期刊名、年份、卷期与页码（启发式检查，需人工确认）。", "references", f"paragraph {idx}", text[:120]))
-            if marker == "D" and (re.search(r"(19|20)\d{2}", text) is None or ("??" not in text and "??" not in text)):
+            if marker == "D" and (re.search(r"(19|20)\d{2}", text) is None or ("大学" not in text and "学校" not in text)):
                 issues.append(_issue_global("reference_entry_format", "reference entry", "学位论文[D]疑似缺少学校信息或年份。", "学位论文应包含学校、所在地与年份（启发式检查，需人工确认）。", "references", f"paragraph {idx}", text[:120]))
             if marker == "EB/OL":
-                if "[????]" not in text and re.search(r"\[[0-9]{4}[-/?]", text) is None:
+                if "[引用日期]" not in text and re.search(r"\[[0-9]{4}[-/年]", text) is None:
                     issues.append(_issue_global("reference_online_access", "reference entry", "电子资源[EB/OL]缺少引用日期。", "应补充[引用日期]、获取和访问路径、数字对象唯一标识符。", "references", f"paragraph {idx}", text[:120]))
                 if re.search(r"https?://|doi", text, re.I) is None:
                     issues.append(_issue_global("reference_online_access", "reference entry", "电子资源[EB/OL]缺少访问路径或DOI。", "应补充[引用日期]、获取和访问路径、数字对象唯一标识符。", "references", f"paragraph {idx}", text[:120]))
 
-        if re.search(r"https?://|doi", text, re.I) and "[????]" not in text and re.search(r"\[[0-9]{4}[-/?]", text) is None:
+        if re.search(r"https?://|doi", text, re.I) and "[引用日期]" not in text and re.search(r"\[[0-9]{4}[-/年]", text) is None:
             issues.append(_issue_global("reference_online_access", "reference entry", "条目含URL/DOI但缺少引用日期。", "网上来源应补充[引用日期]、访问路径与唯一标识符。", "references", f"paragraph {idx}", text[:120]))
 
         author_prefix = text.split(".", 1)[0]

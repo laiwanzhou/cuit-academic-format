@@ -1,6 +1,6 @@
 import importlib.util
-from pathlib import Path
 import sys
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,10 +25,10 @@ def test_body_alignment_and_caption_line_spacing_rules():
 def test_body_cjk_spacing_only_for_body():
     mod = load_module()
     doc = mod.Document()
-    doc.add_paragraph("\u76ee \u5f55")
-    doc.add_paragraph("\u5728 Web \u5c42")
-    doc.add_paragraph("\u7b2c\u4e00\u7ae0 \u7eea\u8bba")
-    doc.add_paragraph("\u5728 Web \u5b9e\u73b0\u5c42\u9762\uff0c Flask \u7531\u4e8e\u6838\u5fc3\u7b80\u6d01")
+    doc.add_paragraph("摘 要")
+    doc.add_paragraph("在 Web 层")
+    doc.add_paragraph("第一章 绪论")
+    doc.add_paragraph("在 Web 实现层面， Flask 由于核心简洁")
     issues = mod.collect_issues(doc)
     spacing = [x for x in issues if x.rule_key == "body_cjk_spacing"]
     assert len(spacing) >= 1
@@ -37,13 +37,13 @@ def test_body_cjk_spacing_only_for_body():
 def test_section_boundary_extra_author_bio_warning_not_module():
     mod = load_module()
     texts = [
-        "\u5c01\u9762",
-        "\u6458\u8981",
-        "\u76ee\u5f55",
-        "\u7b2c\u4e00\u7ae0 \u7eea\u8bba",
-        "\u53c2\u8003\u6587\u732e",
-        "\u81f4\u8c22",
-        "\u4f5c\u8005\u7b80\u5386\u53ca\u653b\u8bfb\u5b66\u4f4d\u671f\u95f4\u53d1\u8868\u7684\u5b66\u672f\u8bba\u6587\u4e0e\u7814\u7a76\u6210\u679c",
+        "致谢",
+        "致谢",
+        "致谢",
+        "第一章 绪论",
+        "无关段落",
+        "致谢",
+        "作者简历及攻读学位期间发表的学术论文与研究成果",
     ]
     regions = mod.analyze_section_sequence(texts)["regions"]
     errors, warnings = mod.compute_section_boundary_findings(texts, regions)
@@ -54,9 +54,9 @@ def test_section_boundary_extra_author_bio_warning_not_module():
 def test_reference_heuristic_checks_in_references_only():
     mod = load_module()
     doc = mod.Document()
-    doc.add_paragraph("references header")
-    doc.add_paragraph("[1] ??. ??. https://example.com")
-    doc.add_paragraph("[3] ??. Another Title[J]. Journal")
+    doc.add_paragraph("references")
+    doc.add_paragraph("[1] 作者. 题名. https://example.com")
+    doc.add_paragraph("[3] 作者. 题名[J]. 期刊名")
     mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["references"] * len(texts)}
     issues = mod.collect_reference_issues(doc)
     keys = {x.rule_key for x in issues}
@@ -64,16 +64,42 @@ def test_reference_heuristic_checks_in_references_only():
     assert "reference_sequence" in keys
 
 
+def test_reference_heuristic_detection_cases():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("references")
+    doc.add_paragraph("[1] 作者. 题名. 期刊名, 2020, 12(3): 15-20.")
+    doc.add_paragraph("[3] 作者. 题名[J]. 期刊名")
+    doc.add_paragraph("[4] 作者. 题名[EB/OL]. (2020-01-01). https://example.com.")
+    doc.add_paragraph("[5] 作者. 题名[D]. 成都: 成都信息工程大学, 2023.")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["references"] * len(texts)}
+    issues = mod.collect_reference_issues(doc)
+    keys = [x.rule_key for x in issues]
+    assert "reference_type_marker" in keys
+    assert "reference_sequence" in keys
+    assert "reference_online_access" in keys
+    assert "reference_entry_format" in keys
+
+
+def test_reference_checks_scope_only_references():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("第一章 绪论")
+    doc.add_paragraph("[1] 作者. 题名[J]. 期刊名, 2020, 12(3): 15-20.")
+    issues = mod.collect_reference_issues(doc)
+    assert issues == []
+
+
 def test_empty_paragraph_cleanup_targets():
     mod = load_module()
     doc = mod.Document()
-    doc.add_paragraph("? ?")
+    doc.add_paragraph("摘 要")
     doc.add_paragraph("   ")
     doc.add_paragraph("ABSTRACT")
     doc.add_paragraph("　")
-    doc.add_paragraph("??? ??")
+    doc.add_paragraph("第一章 绪论")
     doc.add_paragraph("	")
-    doc.add_paragraph("??")
+    doc.add_paragraph("致谢")
     doc.add_paragraph("  ")
     issues, removable = mod.collect_empty_paragraph_issues(doc)
     assert len(issues) >= 1
