@@ -171,7 +171,7 @@ class SkillIntegrityTests(unittest.TestCase):
         self.assertIsNone(spacing.get(module.qn("w:after")))
         self.assertTrue(module.paragraph_matches(paragraph, rule))
 
-    def test_caption_spacing_is_zero_lines(self):
+    def test_caption_spacing_lines_follow_updated_rules(self):
         module = self.load_checker_module()
         document = module.Document()
         for key, text in [("figure_caption", "图2-1 示例图"), ("table_caption", "表2-1 示例表")]:
@@ -181,8 +181,10 @@ class SkillIntegrityTests(unittest.TestCase):
                 module.apply_rule(paragraph, rule)
                 spacing = paragraph._p.get_or_add_pPr().find(module.qn("w:spacing"))
                 ind = paragraph._p.get_or_add_pPr().find(module.qn("w:ind"))
-                self.assertEqual(spacing.get(module.qn("w:beforeLines")), "0")
-                self.assertEqual(spacing.get(module.qn("w:afterLines")), "0")
+                if key == "figure_caption":
+                    self.assertEqual(spacing.get(module.qn("w:afterLines")), "100")
+                if key == "table_caption":
+                    self.assertEqual(spacing.get(module.qn("w:beforeLines")), "100")
                 self.assertEqual(ind.get(module.qn("w:firstLineChars")), "0")
                 self.assertIsNone(ind.get(module.qn("w:firstLine")))
                 self.assertTrue(module.paragraph_matches(paragraph, rule))
@@ -392,7 +394,7 @@ class SkillIntegrityTests(unittest.TestCase):
                 self.assertIn("roman", field_text)
                 self.assertNotIn("Arabic", field_text)
 
-    def test_reference_checks_only_cover_format_not_gbt_content_markers(self):
+    def test_reference_checks_include_heuristics(self):
         module = self.load_checker_module()
         document = module.Document()
         document.add_paragraph("参考文献")
@@ -401,8 +403,7 @@ class SkillIntegrityTests(unittest.TestCase):
         issues = module.collect_reference_issues(document)
         rule_keys = {issue.rule_key for issue in issues}
 
-        self.assertNotIn("reference_number_format", rule_keys)
-        self.assertNotIn("reference_gbt7714_basic", rule_keys)
+        self.assertIn("reference_type_marker", rule_keys)
 
     def test_page_number_requirement_distinguishes_front_and_main_matter(self):
         module = self.load_checker_module()

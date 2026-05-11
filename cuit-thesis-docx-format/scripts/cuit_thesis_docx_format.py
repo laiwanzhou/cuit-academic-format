@@ -193,7 +193,7 @@ RULES: dict[str, Rule] = {
         ALIGN_CENTER,
         first_line_indent_chars=0,
         space_before_lines=0,
-        space_after_lines=0,
+        space_after_lines=1,
         expected="图题置于图下方，宋体五号10.5pt，居中，固定20磅行距，图序与图名之间空一格。",
     ),
     "table_caption": Rule(
@@ -205,7 +205,7 @@ RULES: dict[str, Rule] = {
         None,
         ALIGN_CENTER,
         first_line_indent_chars=0,
-        space_before_lines=0,
+        space_before_lines=1,
         space_after_lines=0,
         expected="表题置于表上方，宋体五号10.5pt，居中，固定20磅行距，表序与表名之间空一格。",
     ),
@@ -480,8 +480,12 @@ def compute_section_boundary_findings(texts: list[str], regions: list[str]) -> t
                 entered_modules.add(marker_module)
                 current_module = region_module if region_module in SECTION_SEQUENCE else marker_module
         compact = compact_text(stripped)
-        if ("浣滆€呯畝鍘?" in compact or "鏀昏瀛︿綅鏈熼棿鍙戣〃" in compact) and current_module != "appendix":
-            warnings.append("检测到九大模块之外的疑似额外组成部分，需要人工确认。")
+        if (
+            "\u4f5c\u8005\u7b80\u5386" in compact
+            or "\u653b\u8bfb\u5b66\u4f4d\u671f\u95f4\u53d1\u8868" in compact
+            or "\u5b66\u672f\u8bba\u6587\u4e0e\u7814\u7a76\u6210\u679c" in compact
+        ) and current_module != "appendix":
+            warnings.append("\u68c0\u6d4b\u5230\u4e5d\u5927\u6a21\u5757\u4e4b\u5916\u7684\u7591\u4f3c\u989d\u5916\u7ec4\u6210\u90e8\u5206\uff0c\u9700\u8981\u4eba\u5de5\u786e\u8ba4\u3002")
     return errors, warnings
 
 
@@ -563,8 +567,6 @@ def classify_paragraph(text: str, in_body: bool, region: str = "front") -> str |
         return "appendix_title"
     if compact in {"致谢", "致謝"}:
         return "acknowledgement_title"
-    if "作者简历" in compact or "攻读学位期间发表" in compact:
-        return "author_bio_title"
     if region == "toc":
         if re.match(r"^第[一二三四五六七八九十百\d]+章\s+\S+", text):
             return "toc_level1"
@@ -588,8 +590,6 @@ def classify_paragraph(text: str, in_body: bool, region: str = "front") -> str |
         return "symbols_body"
     if region == "appendix" and len(text) >= 10:
         return "appendix_body"
-    if region == "author_bio" and len(text) >= 10:
-        return "author_bio_body"
     if region == "acknowledgement" and len(text) >= 10:
         return "acknowledgement_body"
     if region == "abstract_zh" and len(text) >= 20:
@@ -624,8 +624,6 @@ def next_region(text: str, current: str) -> str:
         return "symbols"
     if compact in {"附录", "附錄"}:
         return "appendix"
-    if "作者简历" in compact or "攻读学位期间发表" in compact:
-        return "author_bio"
     if compact in {"致谢", "致謝"}:
         return "acknowledgement"
     return current
@@ -1456,6 +1454,76 @@ def remove_sectpr_only_blank_placeholders(document: Document) -> bool:
     return removed
 
 
+def _is_target_empty_paragraph_text(text: str) -> bool:
+    return re.sub(r"[\s\u3000\xa0]+", "", text or "") == ""
+
+
+def _blank_paragraph_has_risky_nodes(paragraph) -> bool:
+    ppr = paragraph._p.pPr
+    if ppr is not None and ppr.find(qn("w:sectPr")) is not None:
+        return True
+    risky_tags = {
+        qn("w:fldChar"),
+        qn("w:instrText"),
+        qn("w:bookmarkStart"),
+        qn("w:bookmarkEnd"),
+        qn("w:drawing"),
+        qn("w:object"),
+        qn("w:pict"),
+    }
+    for node in paragraph._p.iter():
+        if node.tag in risky_tags:
+            return True
+        if node.tag == qn("w:br"):
+            br_type = node.get(qn("w:type"))
+            if br_type in {"page", "column"}:
+                return True
+    return False
+
+
+def collect_empty_paragraph_issues(document: Document) -> tuple[list[Issue], list[int]]:
+    issues: list[Issue] = []
+    removable: list[int] = []
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    target_regions = {"abstract_zh", "abstract_en", "body", "acknowledgement"}
+    for idx, paragraph in enumerate(document.paragraphs):
+        if idx >= len(regions) or regions[idx] not in target_regions:
+            continue
+        if not _is_target_empty_paragraph_text(paragraph.text):
+            continue
+        risky = _blank_paragraph_has_risky_nodes(paragraph)
+        current = "检测到风险空段，需要人工确认，未自动删除。" if risky else "检测到安全空段，将在修复文档中删除。"
+        issues.append(
+            Issue(
+                paragraph_index=idx,
+                rule_key="empty_paragraph",
+                text_type="empty paragraph in body/abstract/acknowledgement",
+                text_excerpt="[blank paragraph]",
+                current=current,
+                expected="摘要正文、正文、致谢正文中不应保留空白段落，应删除。",
+                message=f"文本类型：empty paragraph in body/abstract/acknowledgement\n当前问题：{current}\n应改为：摘要正文、正文、致谢正文中不应保留空白段落，应删除。",
+                category="structure",
+                location=f"paragraph {idx}",
+            )
+        )
+        if not risky:
+            removable.append(idx)
+    return issues, removable
+
+
+def remove_target_empty_paragraphs(document: Document, removable: list[int]) -> int:
+    removed = 0
+    for idx in sorted(set(removable), reverse=True):
+        if idx < 0 or idx >= len(document.paragraphs):
+            continue
+        paragraph = document.paragraphs[idx]
+        if _is_target_empty_paragraph_text(paragraph.text) and not _blank_paragraph_has_risky_nodes(paragraph):
+            paragraph._element.getparent().remove(paragraph._element)
+            removed += 1
+    return removed
+
+
 def apply_page_setup(document: Document, allow_layout_fixes: bool) -> None:
     for section in document.sections:
         section.page_width = Cm(21)
@@ -1830,104 +1898,142 @@ def collect_table_issues(document: Document) -> list[Issue]:
             prev_text = paragraph_text(blocks[pos - 1][2])
         if pos + 1 < len(blocks) and blocks[pos + 1][0] == "p":
             next_text = paragraph_text(blocks[pos + 1][2])
-        if not re.match(r"^表\s*\d+[-－]\d+\s*\S+", prev_text):
-            issues.append(
-                _issue_global(
-                    "table_caption_position",
-                    "table caption position",
-                    f"表 {table_idx + 1} 上方未检测到“表X-X 表名”格式表题。",
-                    "表序、表名、表注应置于表上方。",
-                    "figure-table",
-                    f"table {table_idx + 1}",
-                    prev_text or next_text,
-                )
-            )
-        if re.match(r"^表\s*\d+[-－]\d+\s*\S+", next_text):
-            issues.append(
-                _issue_global(
-                    "table_caption_position",
-                    "table caption position",
-                    f"表 {table_idx + 1} 下方检测到表题，疑似位置错误。",
-                    "表题应置于表上方，不应置于表下方。",
-                    "figure-table",
-                    f"table {table_idx + 1}",
-                    next_text,
-                )
-            )
+
+        caption_above_ok = re.match(r"^(?:\u8868|Table)\s*\d+[-—.]\d+\s+\S+", prev_text, re.I) is not None
+        if not caption_above_ok:
+            issues.append(_issue_global("table_caption_missing", "table caption", f"表{table_idx + 1} 上方未检测到规范表题。", "表应有编号和表题，且置于表上方。", "table", f"table {table_idx + 1}", prev_text or next_text))
+        if re.match(r"^(?:\u8868|Table)\s*\d+[-—.]\d+\s+\S+", next_text, re.I):
+            issues.append(_issue_global("table_caption_position", "table caption", f"表{table_idx + 1} 下方检测到表题，位置错误。", "表题应置于表上方。", "table", f"table {table_idx + 1}", next_text))
+        if prev_text and re.match(r"^(?:\u8868|Table)\s*\d+[-—.]\d+\S+", prev_text, re.I):
+            issues.append(_issue_global("table_caption_number_format", "table caption", f"表{table_idx + 1} 表序与表名之间缺少空格。", "表序与表名之间应空一个空格。", "table", f"table {table_idx + 1}", prev_text))
+
         style_name = table.style.name if table.style is not None else ""
         if "grid" in style_name.lower() or table_has_vertical_borders(table):
-            issues.append(
-                _issue_global(
-                    "table_three_line",
-                    "three-line table",
-                    f"表 {table_idx + 1} 样式为 {style_name or 'unknown'}，可能包含全网格/竖线。",
-                    "表的编排宜采用三线表；通常只保留顶线、表头下线和底线。",
-                    "figure-table",
-                    f"table {table_idx + 1}",
-                )
-            )
-        if table_idx > 0 and prev_text.endswith("（续）"):
+            issues.append(_issue_global("table_three_line_style", "three-line table", f"表{table_idx + 1} 疑似全网格线/竖线。", "表格宜采用三线表；OOXML 边框检查为启发式，需要人工确认。", "table", f"table {table_idx + 1}"))
+
+        if "\u7eed\u8868" in prev_text or "\uff08\u7eed\uff09" in prev_text:
             first_row = " ".join(cell.text.strip() for cell in table.rows[0].cells) if table.rows else ""
             if not first_row:
-                issues.append(
-                    _issue_global(
-                        "continued_table_header",
-                        "continued table header",
-                        f"续表 {table_idx + 1} 未检测到重复表头。",
-                        "续表均应重复表头。",
-                        "figure-table",
-                        f"table {table_idx + 1}",
-                    )
-                )
+                issues.append(_issue_global("table_continued_header", "continued table", f"续表 {table_idx + 1} 未检测到重复表头。", "续表应重复编号和表头；跨页续表头重复情况需人工确认。", "table", f"table {table_idx + 1}"))
+
+        issues.append(_issue_global("table_manual_review", "table manual review", f"表{table_idx + 1} 随文性、自明性与数据可读性需人工复核。", "请人工确认规范2.6.6.2中的语义要求。", "table", f"table {table_idx + 1}"))
     return issues
 
 
 def collect_reference_issues(document: Document) -> list[Issue]:
     issues: list[Issue] = []
-    regions: dict[str, int] = {}
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    expected_no = 1
     for idx, paragraph in enumerate(document.paragraphs):
-        compact = paragraph_text(paragraph).replace(" ", "")
-        if "结论" in compact and "参考文献" not in compact and "目录" not in compact:
-            regions.setdefault("conclusion", idx)
-        if compact == "参考文献":
-            regions.setdefault("references", idx)
-        if compact in {"附录", "附錄"}:
-            regions.setdefault("appendix", idx)
-    ref_idx = regions.get("references")
-    if ref_idx is not None:
-        conclusion_idx = regions.get("conclusion")
-        appendix_idx = regions.get("appendix")
-        if conclusion_idx is not None and ref_idx < conclusion_idx:
-            issues.append(_issue_global("reference_position", "references position", "参考文献位于结论之前。", "参考文献通常应位于结论之后、附录之前。", "references", "references"))
-        if appendix_idx is not None and ref_idx > appendix_idx:
-            issues.append(_issue_global("reference_position", "references position", "参考文献位于附录之后。", "参考文献通常应位于结论之后、附录之前。", "references", "references"))
-    else:
-        return issues
-    end_idx = regions.get("appendix", len(document.paragraphs))
-    for idx in range(ref_idx + 1, end_idx):
-        paragraph = document.paragraphs[idx]
+        if idx >= len(regions) or regions[idx] != "references":
+            continue
         text = paragraph_text(paragraph)
         if not text:
             continue
-        if not re.match(r"^\[?\d+\]?[\.、]?\s*\S+", text):
+        if classify_paragraph(text, in_body=False, region="references") != "reference_entry":
             continue
-        pf = paragraph.paragraph_format
-        first_indent = pf.first_line_indent.cm if pf.first_line_indent is not None else None
-        if first_indent is None or first_indent >= 0:
+
+        number_match = re.match(r"^\[?(\d+)\]?", text)
+        if not number_match:
+            issues.append(_issue_global("reference_sequence", "reference entry", "条目缺少序号。", "应使用连续的[序号]，并符合规范2.7.2和2.7.3。", "references", f"paragraph {idx}", text[:120]))
+            continue
+        current_no = int(number_match.group(1))
+        if current_no != expected_no:
+            issues.append(_issue_global("reference_sequence", "reference entry", f"序号不连续：期望[{expected_no}]，实际[{current_no}]。", "应使用连续的[序号]，并符合规范2.7.2和2.7.3。", "references", f"paragraph {idx}", text[:120]))
+            expected_no = current_no
+        expected_no += 1
+
+        marker_match = re.search(r"\[\s*([A-Z]+(?:/[A-Z]+)?)\s*\]", text)
+        marker = marker_match.group(1) if marker_match else None
+        if marker is None:
+            issues.append(_issue_global("reference_type_marker", "reference entry", "缺少文献类型标识（如[M]/[J]/[D]/[EB/OL]）。", "应包含类型标识并符合规范2.7.2和2.7.3。", "references", f"paragraph {idx}", text[:120]))
+        else:
+            if marker == "J" and (re.search(r"(19|20)\d{2}", text) is None or (re.search(r"\d+\s*[:?]\s*\d+", text) is None and re.search(r"\d+[-?]\d+", text) is None)):
+                issues.append(_issue_global("reference_entry_format", "reference entry", "期刊文献[J]疑似缺少年份或卷期/页码。", "期刊文献应包含期刊名、年份、卷期与页码（启发式检查，需人工确认）。", "references", f"paragraph {idx}", text[:120]))
+            if marker == "D" and (re.search(r"(19|20)\d{2}", text) is None or ("??" not in text and "??" not in text)):
+                issues.append(_issue_global("reference_entry_format", "reference entry", "学位论文[D]疑似缺少学校信息或年份。", "学位论文应包含学校、所在地与年份（启发式检查，需人工确认）。", "references", f"paragraph {idx}", text[:120]))
+            if marker == "EB/OL":
+                if "[????]" not in text and re.search(r"\[[0-9]{4}[-/?]", text) is None:
+                    issues.append(_issue_global("reference_online_access", "reference entry", "电子资源[EB/OL]缺少引用日期。", "应补充[引用日期]、获取和访问路径、数字对象唯一标识符。", "references", f"paragraph {idx}", text[:120]))
+                if re.search(r"https?://|doi", text, re.I) is None:
+                    issues.append(_issue_global("reference_online_access", "reference entry", "电子资源[EB/OL]缺少访问路径或DOI。", "应补充[引用日期]、获取和访问路径、数字对象唯一标识符。", "references", f"paragraph {idx}", text[:120]))
+
+        if re.search(r"https?://|doi", text, re.I) and "[????]" not in text and re.search(r"\[[0-9]{4}[-/?]", text) is None:
+            issues.append(_issue_global("reference_online_access", "reference entry", "条目含URL/DOI但缺少引用日期。", "网上来源应补充[引用日期]、访问路径与唯一标识符。", "references", f"paragraph {idx}", text[:120]))
+
+        author_prefix = text.split(".", 1)[0]
+        if author_prefix.count(",") >= 3 and "等" not in text:
+            issues.append(_issue_global("reference_author_et_al", "reference entry", "作者人数疑似超过3人但未标注“等”（启发式）。", "多人作者建议写前3位，3人以上在后加“等”，需人工确认。", "references", f"paragraph {idx}", text[:120]))
+    return issues
+
+
+def _shape_cm(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value.cm)
+    except Exception:
+        return None
+
+
+def collect_image_size_issues(document: Document) -> list[Issue]:
+    issues: list[Issue] = []
+    for idx, shape in enumerate(getattr(document, "inline_shapes", []), start=1):
+        h_cm = _shape_cm(getattr(shape, "height", None))
+        w_cm = _shape_cm(getattr(shape, "width", None))
+        if h_cm is None or w_cm is None:
             issues.append(
-                Issue(
-                    paragraph_index=idx,
-                    rule_key="reference_hanging_indent",
-                    text_type="reference hanging indent",
-                    text_excerpt=text[:160],
-                    current=f"first-line indent={first_indent if first_indent is not None else 'unset'}",
-                    expected="参考文献续行缩进两个字符左对齐；通常应使用悬挂缩进。",
-                    message="文本类型：reference hanging indent\n当前格式：未检测到悬挂缩进\n应改为：参考文献续行缩进两个字符左对齐。",
-                    category="references",
-                    location=f"paragraph {idx}",
+                _issue_global(
+                    "image_size_advisory",
+                    "image size",
+                    "无法通过 OOXML 获取图片尺寸，需人工确认。",
+                    "图片一般高6cm×宽8cm；高度不得超过16cm。",
+                    "image",
+                    f"image {idx}",
+                )
+            )
+            continue
+        if h_cm > 16:
+            new_h = 16.0
+            new_w = w_cm * (new_h / h_cm) if h_cm else w_cm
+            issues.append(
+                _issue_global(
+                    "image_height_limit",
+                    "image size",
+                    f"图片高度超过16cm，当前尺寸 {h_cm:.2f}cm×{w_cm:.2f}cm。",
+                    f"图片高度超过16cm，已按比例缩放至16cm高（缩放后约 {new_h:.2f}cm×{new_w:.2f}cm），需人工复核排版。",
+                    "image",
+                    f"image {idx}",
+                )
+            )
+        elif abs(h_cm - 6.0) > 0.2 or abs(w_cm - 8.0) > 0.2:
+            issues.append(
+                _issue_global(
+                    "image_size_advisory",
+                    "image size",
+                    f"当前尺寸 {h_cm:.2f}cm×{w_cm:.2f}cm。",
+                    "图片一般建议高6cm×宽8cm；当前尺寸如因图片量或排版需要缩放，请人工确认。",
+                    "image",
+                    f"image {idx}",
                 )
             )
     return issues
+
+
+def enforce_image_height_limit(document: Document) -> int:
+    scaled = 0
+    for shape in getattr(document, "inline_shapes", []):
+        h_cm = _shape_cm(getattr(shape, "height", None))
+        w_cm = _shape_cm(getattr(shape, "width", None))
+        if h_cm is None or w_cm is None or h_cm <= 16:
+            continue
+        new_h = 16.0
+        new_w = w_cm * (new_h / h_cm) if h_cm else w_cm
+        shape.height = Cm(new_h)
+        shape.width = Cm(new_w)
+        scaled += 1
+    return scaled
 
 
 def collect_issues(document: Document) -> list[Issue]:
@@ -1985,6 +2091,9 @@ def collect_issues(document: Document) -> list[Issue]:
     issues.extend(collect_toc_issues(document))
     issues.extend(collect_table_issues(document))
     issues.extend(collect_reference_issues(document))
+    issues.extend(collect_image_size_issues(document))
+    empty_issues, _to_remove = collect_empty_paragraph_issues(document)
+    issues.extend(empty_issues)
     return issues
 
 
@@ -2006,6 +2115,9 @@ def apply_supported_rules(document: Document, allow_layout_fixes: bool) -> None:
                 normalized_text = normalize_body_cjk_spacing(paragraph.text)
                 if normalized_text != paragraph.text:
                     _apply_text_to_runs(paragraph, normalized_text)
+    _empty_issues, to_remove = collect_empty_paragraph_issues(document)
+    remove_target_empty_paragraphs(document, to_remove)
+    enforce_image_height_limit(document)
 
 
 def qname(ns: str, tag: str) -> str:

@@ -237,7 +237,7 @@ The script must not claim full compliance for rules that require human review, s
 5. Build the nine-section sequence first, then classify each checked paragraph inside its section. Report missing required sections and optional-section reminders in JSON/HTML.
 6. Compare current formatting against the expected rule for that text type, resolving direct formatting and paragraph-style inheritance where possible.
 7. Scan all runs in each recognized paragraph and report mixed direct/inherited run formatting that violates the rule.
-8. Run structural checks for TOC fields/page-number alignment, table captions/three-line table signals/continued headers, and reference section position/indent/basic formatting.
+8. Run structural checks for TOC fields/page-number alignment, table captions/three-line table signals/continued headers, reference heuristics (2.7.2/2.7.3), image-size advisories and >16cm scaling, and empty-paragraph cleanup in abstract/body/acknowledgement.
 9. Insert Word comments into the annotated copy for paragraph-level detected issues.
 10. Apply supported formatting rules to the fixed copy. If the selected path is OOXML-only, skip automatic high-risk layout rewrites unless `--allow-ooxml-layout-fixes` was explicitly requested.
 11. Compare the fixed copy and record the after-format for each issue.
