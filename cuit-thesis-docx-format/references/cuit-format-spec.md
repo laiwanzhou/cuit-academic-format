@@ -36,7 +36,7 @@ Source: `paper-format/成都信息工程大学学士学位论文规范.docx`
 - Chapter title, such as `第一章 绪论`: Songti 16 pt, bold, centered, exact line spacing 20 pt, before/after 0.5 line. One space between chapter number and title.
 - Second-level heading, such as `1.2 文献概述`: Songti 14 pt, bold, left aligned, exact line spacing 20 pt, before/after 0.5 line. One space between number and title.
 - Third-level heading, such as `1.2.1 尚待解决的问题`: Songti 12 pt, bold, left aligned, exact line spacing 20 pt, before/after 0.5 line. One space between number and title.
-- Body paragraph: Chinese Songti 12 pt, English and numbers Times New Roman 12 pt, left aligned or justified, first-line indent 2 Chinese characters, before/after 0 pt, exact line spacing 20 pt.
+- Body paragraph: Chinese Songti 12 pt, English and numbers Times New Roman 12 pt, justified, first-line indent 2 Chinese characters, before/after 0 pt, exact line spacing 20 pt.
 
 ## Figures, Tables, And Formulas
 

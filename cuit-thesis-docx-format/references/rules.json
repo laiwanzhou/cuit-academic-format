@@ -221,12 +221,12 @@
       "font_ascii": "Times New Roman",
       "size_pt": 12,
       "bold": null,
-      "alignment": "left",
+      "alignment": "justified",
       "line_spacing_pt": 20,
       "first_line_indent_chars": 2,
       "space_before_pt": 0,
       "space_after_pt": 0,
-      "expected": "正文：中文宋体小四12pt，英文和数字Times New Roman 12pt，左对齐，首行缩进2个汉字符，段前段后0磅，固定20磅行距。"
+      "expected": "正文：中文宋体小四12pt，英文和数字Times New Roman 12pt，两端对齐，首行缩进2个汉字符，段前段后0磅，固定20磅行距。"
     },
     "figure_caption": {
       "label": "figure caption",

@@ -201,14 +201,53 @@ class SkillIntegrityTests(unittest.TestCase):
                 self.assertEqual(module.RULES[key].space_before_lines, 0.5)
                 self.assertEqual(module.RULES[key].space_after_lines, 0.5)
 
-    def test_body_alignment_is_left_only_per_spec(self):
+    def test_body_alignment_is_justified_per_spec(self):
         module = self.load_checker_module()
         document = module.Document()
         paragraph = document.add_paragraph("正文段落内容足够长，用于测试对齐方式。")
-        paragraph.alignment = module.WD_ALIGN_PARAGRAPH.JUSTIFY
         rule = module.RULES["body"]
+        module.apply_rule(paragraph, rule)
 
-        self.assertFalse(module.paragraph_matches(paragraph, rule))
+        self.assertEqual(paragraph.alignment, module.WD_ALIGN_PARAGRAPH.JUSTIFY)
+        self.assertTrue(module.paragraph_matches(paragraph, rule))
+
+    def test_rules_json_body_alignment_is_justified(self):
+        rules_path = ROOT / "references" / "rules.json"
+        data = json.loads(rules_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["rules"]["body"]["alignment"], "justified")
+
+    def test_normalize_body_cjk_spacing_removes_spaces_around_cjk(self):
+        module = self.load_checker_module()
+        self.assertEqual(
+            module.normalize_body_cjk_spacing("在 Web 实现层面， Flask 由于核心简洁"),
+            "在Web实现层面，Flask由于核心简洁",
+        )
+        self.assertEqual(module.normalize_body_cjk_spacing("Flask 由于核心简洁"), "Flask由于核心简洁")
+        self.assertEqual(module.normalize_body_cjk_spacing("使用 3 个模块"), "使用3个模块")
+        self.assertEqual(module.normalize_body_cjk_spacing("2025 年完成"), "2025年完成")
+
+    def test_normalize_body_cjk_spacing_keeps_non_cjk_internal_spaces(self):
+        module = self.load_checker_module()
+        self.assertEqual(module.normalize_body_cjk_spacing("Machine Learning 方法"), "Machine Learning方法")
+        self.assertEqual(module.normalize_body_cjk_spacing("Times New Roman 字体"), "Times New Roman字体")
+        self.assertEqual(module.normalize_body_cjk_spacing("210 mm 宽"), "210 mm宽")
+        self.assertEqual(module.normalize_body_cjk_spacing("20 pt 字号"), "20 pt字号")
+
+    def test_body_spacing_issue_only_for_body_paragraph(self):
+        module = self.load_checker_module()
+        document = module.Document()
+        document.add_paragraph("第一章 绪论")
+        heading2 = document.add_paragraph("1.1 研究背景")
+        heading2.style = document.styles["Heading 2"]
+        document.add_paragraph("在 Web 实现层面， Flask 由于核心简洁")
+        document.add_paragraph("Key words: Machine Learning")
+
+        issues = module.collect_issues(document)
+        spacing_issues = [issue for issue in issues if issue.rule_key == "body_cjk_spacing"]
+
+        self.assertEqual(len(spacing_issues), 1)
+        self.assertEqual(spacing_issues[0].paragraph_index, 2)
+        self.assertIn("应改为", spacing_issues[0].message)
 
     def test_short_body_paragraphs_are_checked(self):
         module = self.load_checker_module()

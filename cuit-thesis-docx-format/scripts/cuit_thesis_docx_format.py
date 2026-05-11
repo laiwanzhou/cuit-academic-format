@@ -177,11 +177,11 @@ RULES: dict[str, Rule] = {
         "Times New Roman",
         12,
         None,
-        ALIGN_LEFT,
+        ALIGN_JUSTIFIED,
         first_line_indent_chars=2,
         space_before_pt=0,
         space_after_pt=0,
-        expected="中文宋体小四12pt，英文和数字Times New Roman 12pt，左对齐，首行缩进2个汉字符，段前段后0磅，固定20磅行距。",
+        expected="中文宋体小四12pt，英文和数字Times New Roman 12pt，两端对齐，首行缩进2个汉字符，段前段后0磅，固定20磅行距。",
     ),
     "figure_caption": Rule(
         "figure_caption",
@@ -641,6 +641,43 @@ def contains_cjk(text: str) -> bool:
 
 def contains_latin_or_digit(text: str) -> bool:
     return bool(re.search(r"[A-Za-z0-9]", text))
+
+
+CJK_SPACING_BOUNDARY = r"\u3400-\u9fff\u3000-\u303f\uff00-\uffef"
+BODY_CJK_SPACING_EXPECTED = "正文中只允许非中文之间保留空格；汉字两端不允许有空格；中文与英文、数字、中文标点之间的手动空格应删除。"
+
+
+def normalize_body_cjk_spacing(text: str) -> str:
+    normalized = text
+    normalized = re.sub(rf"([{CJK_SPACING_BOUNDARY}])\s+", r"\1", normalized)
+    normalized = re.sub(rf"\s+([{CJK_SPACING_BOUNDARY}])", r"\1", normalized)
+    return normalized
+
+
+def find_body_cjk_spacing_issues(text: str) -> list[str]:
+    normalized = normalize_body_cjk_spacing(text)
+    if normalized == text:
+        return []
+    return [f"{text} -> {normalized}"]
+
+
+def _apply_text_to_runs(paragraph, new_text: str) -> None:
+    runs = list(paragraph.runs)
+    if not runs:
+        if paragraph.text != new_text:
+            paragraph.text = new_text
+        return
+    old_text = "".join(run.text for run in runs)
+    if old_text == new_text:
+        return
+    cursor = 0
+    for idx, run in enumerate(runs):
+        if idx == len(runs) - 1:
+            run.text = new_text[cursor:]
+            break
+        take = min(len(run.text), max(len(new_text) - cursor, 0))
+        run.text = new_text[cursor : cursor + take]
+        cursor += take
 
 
 def run_format_summary(run, paragraph) -> str:
@@ -1855,6 +1892,26 @@ def collect_issues(document: Document) -> list[Issue]:
                     location=f"paragraph {idx}",
                 )
             )
+        if key == "body":
+            normalized_text = normalize_body_cjk_spacing(text)
+            if normalized_text != text:
+                issues.append(
+                    Issue(
+                        paragraph_index=idx,
+                        rule_key="body_cjk_spacing",
+                        text_type="body paragraph CJK spacing",
+                        text_excerpt=text[:160],
+                        current=text,
+                        expected=BODY_CJK_SPACING_EXPECTED,
+                        message=(
+                            "文本类型：body paragraph CJK spacing\n"
+                            f"当前问题：{text}\n"
+                            f"应改为：{normalized_text}"
+                        ),
+                        category="body-spacing",
+                        location=f"paragraph {idx}",
+                    )
+                )
         issues.extend(collect_run_format_issues(paragraph, idx, rule, text))
     issues.extend(collect_section_issues(document))
     issues.extend(collect_abstract_title_issues(document))
@@ -1878,6 +1935,10 @@ def apply_supported_rules(document: Document, allow_layout_fixes: bool) -> None:
         key = classify_checked_paragraph(paragraph, idx, text, regions[idx], title_overrides)
         if key is not None:
             apply_rule(paragraph, RULES[key])
+            if key == "body":
+                normalized_text = normalize_body_cjk_spacing(paragraph.text)
+                if normalized_text != paragraph.text:
+                    _apply_text_to_runs(paragraph, normalized_text)
 
 
 def qname(ns: str, tag: str) -> str:
