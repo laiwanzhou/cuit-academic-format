@@ -1395,9 +1395,14 @@ def _xml_para_text(para_xml) -> str:
     return re.sub(r"\s+", " ", "".join(para_xml.itertext()) if para_xml is not None else "").strip()
 
 
-def ensure_abstract_heading_split(document: Document) -> None:
+def ensure_abstract_heading_split(document: Document, regions: list[str] | None = None) -> None:
+    if regions is None:
+        texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+        regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
     # Iterate over a snapshot because we may insert heading paragraphs before current ones.
-    for paragraph in list(document.paragraphs):
+    for idx, paragraph in enumerate(list(document.paragraphs)):
+        if idx >= len(regions) or regions[idx] != "abstract_zh":
+            continue
         text = paragraph_text(paragraph)
         if not text:
             continue
@@ -1412,9 +1417,10 @@ def ensure_abstract_heading_split(document: Document) -> None:
             continue
 
 
-def normalize_english_abstract_title(document: Document) -> None:
-    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
-    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+def normalize_english_abstract_title(document: Document, regions: list[str] | None = None) -> None:
+    if regions is None:
+        texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+        regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
     for idx, paragraph in enumerate(document.paragraphs):
         if idx >= len(regions) or regions[idx] != "abstract_en":
             continue
@@ -1437,9 +1443,10 @@ def normalize_english_abstract_title(document: Document) -> None:
             _replace_paragraph_runs(paragraph, [("ABSTRACT", True)])
 
 
-def normalize_keywords_label_runs(document: Document) -> None:
-    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
-    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+def normalize_keywords_label_runs(document: Document, regions: list[str] | None = None) -> None:
+    if regions is None:
+        texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+        regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
     for idx, paragraph in enumerate(document.paragraphs):
         if idx >= len(regions) or regions[idx] not in {"abstract_zh", "abstract_en"}:
             continue
@@ -1519,13 +1526,15 @@ def ensure_english_abstract_starts_new_page(document: Document) -> bool:
     return changed
 
 
-def remove_redundant_front_blank_paragraphs(document: Document) -> bool:
+def remove_redundant_blank_paragraphs_by_region(
+    document: Document,
+    regions: list[str],
+    allowed_regions: set[str],
+) -> bool:
     texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
-    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
-    front_regions = {"abstract_zh", "abstract_en", "toc"}
     removed = False
     for idx in range(len(document.paragraphs) - 2, 0, -1):
-        if idx >= len(regions) or regions[idx] not in front_regions:
+        if idx >= len(regions) or regions[idx] not in allowed_regions:
             continue
         if texts[idx]:
             continue
@@ -1534,15 +1543,21 @@ def remove_redundant_front_blank_paragraphs(document: Document) -> bool:
             continue
         prev_region = regions[idx - 1] if idx - 1 < len(regions) else None
         next_region = regions[idx + 1] if idx + 1 < len(regions) else None
-        if prev_region in front_regions and next_region in front_regions:
+        if prev_region in allowed_regions and next_region in allowed_regions:
             paragraph._element.getparent().remove(paragraph._element)
             removed = True
     return removed
 
 
-def remove_sectpr_only_blank_placeholders(document: Document) -> bool:
+def remove_sectpr_only_blank_placeholders(
+    document: Document,
+    regions: list[str],
+    allowed_regions: set[str],
+) -> bool:
     removed = False
     for idx in range(len(document.paragraphs) - 1, 0, -1):
+        if idx >= len(regions) or regions[idx] not in allowed_regions:
+            continue
         paragraph = document.paragraphs[idx]
         if paragraph_text(paragraph):
             continue
@@ -1596,12 +1611,17 @@ def _blank_paragraph_has_risky_nodes(paragraph) -> bool:
     return False
 
 
-def collect_empty_paragraph_issues(document: Document) -> tuple[list[Issue], list[int]]:
+def collect_empty_paragraph_issues(
+    document: Document,
+    regions: list[str] | None = None,
+    allowed_regions: set[str] | None = None,
+) -> tuple[list[Issue], list[int]]:
     issues: list[Issue] = []
     removable: list[int] = []
-    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
-    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
-    target_regions = {"abstract_zh", "abstract_en", "body", "acknowledgement"}
+    if regions is None:
+        texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+        regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    target_regions = allowed_regions or {"abstract_zh", "abstract_en", "body", "acknowledgement"}
     for idx, paragraph in enumerate(document.paragraphs):
         if idx >= len(regions) or regions[idx] not in target_regions:
             continue
@@ -1640,12 +1660,25 @@ def remove_target_empty_paragraphs(document: Document, removable: list[int]) -> 
 
 
 def normalize_document_structure(document: Document) -> None:
-    ensure_abstract_heading_split(document)
-    normalize_english_abstract_title(document)
-    normalize_keywords_label_runs(document)
-    remove_sectpr_only_blank_placeholders(document)
-    remove_redundant_front_blank_paragraphs(document)
-    _empty_issues, to_remove = collect_empty_paragraph_issues(document)
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    allowed_regions = {"abstract_zh", "abstract_en", "body", "acknowledgement"}
+    ensure_abstract_heading_split(document, regions)
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    normalize_english_abstract_title(document, regions)
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    normalize_keywords_label_runs(document, regions)
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    remove_sectpr_only_blank_placeholders(document, regions, allowed_regions)
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    remove_redundant_blank_paragraphs_by_region(document, regions, {"abstract_zh", "abstract_en"})
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    _empty_issues, to_remove = collect_empty_paragraph_issues(document, regions=regions, allowed_regions=allowed_regions)
     remove_target_empty_paragraphs(document, to_remove)
 
 

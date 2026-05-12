@@ -332,6 +332,82 @@ def test_after_formats_not_shifted_after_structure_normalization():
             assert "Heading 2" not in issue.after
 
 
+def test_cover_blank_paragraphs_are_not_deleted():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("成都信息工程大学学位论文")
+    doc.add_paragraph(" ")
+    doc.add_paragraph(" ")
+    doc.add_paragraph("姓名：张三")
+    doc.add_paragraph("专业：计算机科学与技术")
+    doc.add_paragraph("摘 要")
+    doc.add_paragraph("这是摘要正文。")
+    before = [p.text for p in doc.paragraphs]
+    mod.normalize_document_structure(doc)
+    after = [p.text for p in doc.paragraphs]
+    assert after.count(" ") >= 2
+    assert "姓名：张三" in after
+    assert "专业：计算机科学与技术" in after
+    assert after.index("姓名：张三") < after.index("摘 要")
+    assert len(after) >= len(before) - 1
+
+
+def test_abstract_blank_paragraphs_still_removed():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("摘 要")
+    doc.add_paragraph("这是摘要正文。")
+    doc.add_paragraph("关键词：数据可视化；机器学习")
+    doc.add_paragraph(" ")
+    doc.add_paragraph(" ")
+    doc.add_paragraph("ABSTRACT")
+    before_len = len(doc.paragraphs)
+    mod.normalize_document_structure(doc)
+    after_texts = [p.text.strip() for p in doc.paragraphs]
+    assert len(doc.paragraphs) < before_len
+    assert "ABSTRACT" in after_texts
+
+
+def test_cover_sectpr_blank_not_migrated_or_deleted():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("成都信息工程大学学位论文")
+    cover_blank = doc.add_paragraph("")
+    ppr = cover_blank._p.get_or_add_pPr()
+    sect = mod.OxmlElement("w:sectPr")
+    ppr.append(sect)
+    doc.add_paragraph("姓名：张三")
+    doc.add_paragraph("摘 要")
+    doc.add_paragraph("摘要正文。")
+    before_len = len(doc.paragraphs)
+    mod.normalize_document_structure(doc)
+    assert len(doc.paragraphs) >= before_len
+    assert any(
+        p._p.pPr is not None and p._p.pPr.find(mod.qn("w:sectPr")) is not None
+        for p in doc.paragraphs
+    )
+
+
+def test_english_abstract_split_only_in_abstract_en_region():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("Design and Implementation of Abstract Monitoring Platform")
+    doc.add_paragraph("Abstract: With the outbreak and spread...")
+    doc.add_paragraph("第一章 绪论")
+    doc.add_paragraph("This section discusses Abstract: pattern.")
+
+    def fake_regions(texts, has_toc_field=False):
+        return {"regions": ["cover", "abstract_en", "body", "body"]}
+
+    mod.analyze_section_sequence = fake_regions
+    mod.normalize_document_structure(doc)
+    texts = [p.text for p in doc.paragraphs]
+    assert "Design and Implementation of Abstract Monitoring Platform" in texts
+    idx = texts.index("ABSTRACT")
+    assert texts[idx + 1].startswith("With the outbreak")
+    assert "Abstract: pattern." in texts[-1]
+
+
 def test_body_abstract_word_not_reported_as_title():
     mod = load_module()
     doc = mod.Document()
