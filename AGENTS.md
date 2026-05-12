@@ -55,7 +55,8 @@ python -m py_compile cuit-thesis-docx-format/scripts/cuit_thesis_docx_format.py
 提交前必须搜索这些危险模式：
 
 ```powershell
-Select-String -Path cuit-thesis-docx-format\**\* -Pattern "????","??????","浣滆","鏀昏"," " -SimpleMatch
+Select-String -Path cuit-thesis-docx-format\**\* -Pattern "????","??????","浣滆","鏀昏" -SimpleMatch
+Select-String -Path cuit-thesis-docx-format\**\* -Pattern ([char]0xFFFD) -SimpleMatch
 ```
 
 如果发现这些内容出现在源码、规则、Markdown、测试样例、expected 文案、报告文案中，必须修复后再提交。
