@@ -311,7 +311,7 @@
       "bold": null,
       "alignment": "left",
       "line_spacing_pt": 20,
-      "expected": "参考文献条目：中文宋体小四12pt，英文和数字Times New Roman 12pt，固定20磅行距，续行缩进两个字符左对齐。"
+      "expected": "参考文献条目：中文宋体小四12pt，英文和数字Times New Roman 12pt，固定20磅行距，续行缩进两个字符左对齐。参考文献条目还应符合 2.7.2 主要参考文献著录表格式；工具将按文献类型标识进行启发式检查。网上获取文献应补充引用日期、访问路径和 DOI 等信息；多作者应按 2.7.3 要求著录。工具不自动重写学术内容。"
     },
     "appendix_title": {
       "label": "appendix title",

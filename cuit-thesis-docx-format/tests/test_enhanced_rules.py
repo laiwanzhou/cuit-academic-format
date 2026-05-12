@@ -51,34 +51,101 @@ def test_section_boundary_extra_author_bio_warning_not_module():
     assert all("author_bio" not in x for x in errors)
 
 
-def test_reference_heuristic_checks_in_references_only():
-    mod = load_module()
+def _collect_reference_keys(mod, entries):
     doc = mod.Document()
-    doc.add_paragraph("references")
-    doc.add_paragraph("[1] 作者. 题名. https://example.com")
-    doc.add_paragraph("[3] 作者. 题名[J]. 期刊名")
+    doc.add_paragraph("参考文献")
+    for line in entries:
+        doc.add_paragraph(line)
     mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["references"] * len(texts)}
     issues = mod.collect_reference_issues(doc)
-    keys = {x.rule_key for x in issues}
-    assert "reference_online_access" in keys
-    assert "reference_sequence" in keys
+    return issues, {x.rule_key for x in issues}
 
 
-def test_reference_heuristic_detection_cases():
+def test_reference_272_valid_journal_match():
     mod = load_module()
-    doc = mod.Document()
-    doc.add_paragraph("references")
-    doc.add_paragraph("[1] 作者. 题名. 期刊名, 2020, 12(3): 15-20.")
-    doc.add_paragraph("[3] 作者. 题名[J]. 期刊名")
-    doc.add_paragraph("[4] 作者. 题名[EB/OL]. (2020-01-01). https://example.com.")
-    doc.add_paragraph("[5] 作者. 题名[D]. 成都: 成都信息工程大学, 2023.")
-    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["references"] * len(texts)}
-    issues = mod.collect_reference_issues(doc)
-    keys = [x.rule_key for x in issues]
+    issues, keys = _collect_reference_keys(mod, ["[1] 作者. 题名[J]. 期刊名, 2020, 12(3): 15-20."])
+    assert "reference_272_format_no_match" not in keys
+    assert "reference_272_type_format_mismatch" not in keys
+
+
+def test_reference_272_invalid_journal():
+    mod = load_module()
+    issues, keys = _collect_reference_keys(mod, ["[1] 作者. 题名[J]. 期刊名."])
+    assert "reference_272_type_format_mismatch" in keys or "reference_entry_format" in keys
+
+
+def test_reference_272_valid_dissertation():
+    mod = load_module()
+    _issues, keys = _collect_reference_keys(mod, ["[1] 作者. 题名[D]. 成都: 成都信息工程大学, 2023."])
+    assert "reference_272_format_no_match" not in keys
+
+
+def test_reference_272_invalid_dissertation():
+    mod = load_module()
+    _issues, keys = _collect_reference_keys(mod, ["[1] 作者. 题名[D]."])
+    assert "reference_272_type_format_mismatch" in keys
+
+
+def test_reference_272_valid_ebol():
+    mod = load_module()
+    _issues, keys = _collect_reference_keys(mod, ["[1] 作者. 题名[EB/OL]. (2020-01-01)[2024-01-01]. https://example.com."])
+    assert "reference_272_format_no_match" not in keys
+
+
+def test_reference_272_invalid_ebol_missing_citation_date():
+    mod = load_module()
+    _issues, keys = _collect_reference_keys(mod, ["[1] 作者. 题名[EB/OL]. https://example.com."])
+    assert "reference_273_online_access_missing" in keys or "reference_272_type_format_mismatch" in keys
+
+
+def test_reference_272_no_match():
+    mod = load_module()
+    _issues, keys = _collect_reference_keys(mod, ["[1] 这是一条随便写的参考文献"])
+    assert "reference_272_format_no_match" in keys
+
+
+def test_reference_missing_type_marker():
+    mod = load_module()
+    _issues, keys = _collect_reference_keys(mod, ["[1] 作者. 题名. 期刊名, 2020, 12(3): 15-20."])
     assert "reference_type_marker" in keys
+
+
+def test_reference_sequence_not_continuous():
+    mod = load_module()
+    _issues, keys = _collect_reference_keys(
+        mod,
+        [
+            "[1] 作者. 题名[J]. 期刊名, 2020, 12(3): 15-20.",
+            "[3] 作者. 题名[J]. 期刊名, 2021, 13(4): 21-30.",
+        ],
+    )
     assert "reference_sequence" in keys
-    assert "reference_online_access" in keys
-    assert "reference_entry_format" in keys
+
+
+def test_reference_272_valid_m_s_p_n():
+    mod = load_module()
+    _issues, keys = _collect_reference_keys(
+        mod,
+        [
+            "[1] 作者. 题名[M]. 北京: 出版社, 2020: 10-20.",
+            "[2] GB/T 7714-2015, 信息与文献 参考文献著录规则[S]. 北京: 中国标准出版社, 2015.",
+            "[3] 张三. 一种数据处理方法: CN101234567A[P]. 2020-01-01.",
+            "[4] 作者. 题名[N]. 人民日报, 2020-01-01(01).",
+        ],
+    )
+    assert "reference_272_format_no_match" not in keys
+
+
+def test_reference_273_online_missing_for_journal_with_url():
+    mod = load_module()
+    _issues, keys = _collect_reference_keys(mod, ["[1] 作者. 题名[J]. 期刊名, 2020, 12(3): 15-20. https://example.com."])
+    assert "reference_273_online_access_missing" in keys
+
+
+def test_reference_273_author_et_al():
+    mod = load_module()
+    _issues, keys = _collect_reference_keys(mod, ["[1] 张三, 李四, 王五, 赵六. 题名[J]. 期刊名, 2020, 12(3): 15-20."])
+    assert "reference_273_author_et_al" in keys
 
 
 def test_reference_checks_scope_only_references():

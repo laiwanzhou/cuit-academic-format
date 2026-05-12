@@ -59,5 +59,11 @@ Source: `paper-format/成都信息工程大学学士学位论文规范.docx`
 
 - `参考文献`: same as chapter title, Songti 16 pt, bold.
 - Reference entries: Songti 12 pt; English and numerals Times New Roman 12 pt; exact line spacing 20 pt; hanging indent 2 characters.
+- Reference entries should also follow section 2.7.2 major bibliographic templates. The checker performs heuristic matching for `[M]/[C]/[R]/[D]/[P]/[S]/[J]/[N]/[EB/OL]` and extracted references (`//`).
+- If an entry does not match any 2.7.2 template, the report raises `reference_272_format_no_match`.
+- If an entry has a type marker but lacks corresponding required elements, the report raises `reference_272_type_format_mismatch`.
+- For online-source references (URL/DOI patterns), section 2.7.3 checks include citation date, access path, and DOI/unique identifier hints.
+- Multi-author entries are heuristically checked for the “前三位后加等” rule and reported as manual-review findings when suspicious.
+- The tool checks and reports reference issues but does not automatically rewrite academic bibliographic content.
 - `附 录`: title same as references, one space between characters.
 - `致 谢`: title same as chapter title, one space between characters. Body Songti 12 pt, exact line spacing 20 pt.

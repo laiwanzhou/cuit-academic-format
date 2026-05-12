@@ -1979,51 +1979,283 @@ def collect_table_issues(document: Document) -> list[Issue]:
     return issues
 
 
-def collect_reference_issues(document: Document) -> list[Issue]:
+REFERENCE_272_FORMATS: dict[str, dict[str, object]] = {
+    "M": {
+        "type_marker": "M",
+        "label": "专著",
+        "template_text": "[序号] 主要责任者. 题名[M]. 出版地: 出版者, 出版年: 起止页码.",
+        "required_elements": ["责任者", "题名", "类型标识[M]", "出版地", "出版者", "出版年"],
+    },
+    "C": {
+        "type_marker": "C",
+        "label": "论文集/会议录",
+        "template_text": "[序号] 主要责任者. 题名[C]. 出版地: 出版者, 出版年: 起止页码.",
+        "required_elements": ["责任者", "题名", "类型标识[C]", "出版地", "出版者", "出版年"],
+    },
+    "R": {
+        "type_marker": "R",
+        "label": "报告",
+        "template_text": "[序号] 主要责任者. 题名[R]. 出版地: 出版者或机构, 年份.",
+        "required_elements": ["责任者", "题名", "类型标识[R]", "出版地或机构", "年份"],
+    },
+    "D": {
+        "type_marker": "D",
+        "label": "学位论文",
+        "template_text": "[序号] 主要责任者. 题名[D]. 保存地点: 保存单位, 年份.",
+        "required_elements": ["责任者", "题名", "类型标识[D]", "保存地点", "保存单位", "年份"],
+    },
+    "P": {
+        "type_marker": "P",
+        "label": "专利",
+        "template_text": "[序号] 专利申请者. 专利题名: 专利国别, 专利号[P]. 公告日期或公开日期.",
+        "required_elements": ["责任者", "题名", "类型标识[P]", "专利号", "日期"],
+    },
+    "S": {
+        "type_marker": "S",
+        "label": "标准",
+        "template_text": "[序号] 标准编号, 标准名称[S]. 出版地: 出版者, 出版年.",
+        "required_elements": ["标准编号", "标准名称", "类型标识[S]", "年份"],
+    },
+    "J": {
+        "type_marker": "J",
+        "label": "期刊文章",
+        "template_text": "[序号] 主要责任者. 题名[J]. 刊名, 年, 卷(期): 起止页码.",
+        "required_elements": ["责任者", "题名", "类型标识[J]", "刊名", "年份", "卷期", "页码"],
+    },
+    "N": {
+        "type_marker": "N",
+        "label": "报纸文章",
+        "template_text": "[序号] 主要责任者. 题名[N]. 报纸名, 出版日期(版次).",
+        "required_elements": ["责任者", "题名", "类型标识[N]", "报纸名", "出版日期", "版次"],
+    },
+    "EB/OL": {
+        "type_marker": "EB/OL",
+        "label": "电子资源",
+        "template_text": "[序号] 主要责任者. 题名[EB/OL]. 更新或修改日期[引用日期]. 获取和访问路径. DOI.",
+        "required_elements": ["责任者", "题名", "类型标识[EB/OL]", "引用日期", "访问路径"],
+    },
+    "extracted": {
+        "type_marker": "extracted",
+        "label": "析出文献",
+        "template_text": "[序号] 析出文献责任者. 析出题名[类型]//原文献责任者. 原文献题名. 出版地: 出版者, 出版年: 页码.",
+        "required_elements": ["//", "前后要素基本完整", "出版信息要素"],
+    },
+}
+
+
+def _reference_type_marker(text: str) -> str | None:
+    marker_match = re.search(r"\[\s*([A-Z]+(?:/[A-Z]+)?)\s*\]", text)
+    return marker_match.group(1) if marker_match else None
+
+
+def _has_citation_date(text: str) -> bool:
+    return bool(re.search(r"\[[0-9]{4}[-/年][^\]]*\]", text)) or ("[引用日期]" in text)
+
+
+def _has_online_path(text: str) -> bool:
+    return bool(re.search(r"https?://|www\.|doi\.org|DOI\s*[:：]|doi\s*[:：]", text, re.I))
+
+
+def _has_year(text: str) -> bool:
+    return bool(re.search(r"(19|20)\d{2}", text))
+
+
+def _has_page_range(text: str) -> bool:
+    return bool(re.search(r"\d+\s*[-–—]\s*\d+", text))
+
+
+def _has_volume_issue(text: str) -> bool:
+    return bool(re.search(r"\d+\s*[（(]\s*\d+\s*[)）]", text))
+
+
+def _reference_missing_elements(marker: str, text: str) -> list[str]:
+    missing: list[str] = []
+    head = text.split(".", 1)[0]
+    if len(head.strip()) <= 3:
+        missing.append("责任者")
+    if "." not in text:
+        missing.append("题名")
+    if marker == "J":
+        if not _has_year(text):
+            missing.append("年份")
+        if not _has_volume_issue(text):
+            missing.append("卷期")
+        if not _has_page_range(text):
+            missing.append("页码")
+    elif marker in {"M", "C"}:
+        if ":" not in text and "：" not in text:
+            missing.append("出版地/出版者分隔")
+        if not _has_year(text):
+            missing.append("出版年")
+    elif marker == "R":
+        if not _has_year(text):
+            missing.append("年份")
+        if ":" not in text and "：" not in text:
+            missing.append("出版地或机构")
+    elif marker == "D":
+        if not re.search(r"大学|学院|研究院|研究所|学校", text):
+            missing.append("保存单位")
+        if ":" not in text and "：" not in text:
+            missing.append("保存地点")
+        if not _has_year(text):
+            missing.append("年份")
+    elif marker == "P":
+        if not re.search(r"(CN|US|EP|JP)\s*\d+|专利号", text, re.I):
+            missing.append("专利号")
+        if not re.search(r"(19|20)\d{2}[-/年]", text):
+            missing.append("公告/公开日期")
+    elif marker == "S":
+        if not re.search(r"\b(?:GB|GB/T|ISO|IEC|IEEE|CY/T)[-／/A-Z0-9.]*", text, re.I):
+            missing.append("标准编号")
+        if not _has_year(text):
+            missing.append("年份")
+    elif marker == "N":
+        if not re.search(r"(19|20)\d{2}[-/年]", text):
+            missing.append("出版日期")
+        if not re.search(r"[（(][A-Za-z0-9一二三四五六七八九十]+[)）]|第?\d+版", text):
+            missing.append("版次")
+    elif marker == "EB/OL":
+        if not _has_citation_date(text):
+            missing.append("引用日期")
+        if not _has_online_path(text):
+            missing.append("访问路径")
+    return missing
+
+
+def _matches_any_272_format(text: str, marker: str | None) -> tuple[list[str], dict[str, list[str]]]:
+    matched: list[str] = []
+    missing_map: dict[str, list[str]] = {}
+    markers = [marker] if marker in REFERENCE_272_FORMATS else [m for m in REFERENCE_272_FORMATS if m != "extracted"]
+    if "//" in text:
+        markers = list(dict.fromkeys(markers + ["extracted"]))
+    for mk in markers:
+        if mk == "extracted":
+            miss = []
+            parts = text.split("//", 1)
+            if len(parts) != 2:
+                miss.append("//")
+            else:
+                if _reference_type_marker(parts[0]) is None:
+                    miss.append("析出部分类型标识")
+                if ":" not in parts[1] and "：" not in parts[1]:
+                    miss.append("原文献出版信息")
+                if not _has_year(parts[1]):
+                    miss.append("原文献年份")
+            if not miss:
+                matched.append(mk)
+            missing_map[mk] = miss
+            continue
+        miss = _reference_missing_elements(mk, text)
+        if not miss:
+            matched.append(mk)
+        missing_map[mk] = miss
+    return matched, missing_map
+
+
+def _reference_entries_from_regions(paragraphs, texts: list[str], regions: list[str]) -> tuple[list[dict[str, object]], list[Issue]]:
+    entries: list[dict[str, object]] = []
     issues: list[Issue] = []
-    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
-    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
-    expected_no = 1
-    for idx, paragraph in enumerate(document.paragraphs):
+    current: dict[str, object] | None = None
+    for idx, paragraph in enumerate(paragraphs):
         if idx >= len(regions) or regions[idx] != "references":
             continue
-        text = paragraph_text(paragraph)
+        text = paragraph_text(paragraph).strip()
         if not text:
             continue
         if classify_paragraph(text, in_body=False, region="references") != "reference_entry":
             continue
-
         number_match = re.match(r"^\[?(\d+)\]?", text)
-        if not number_match:
-            issues.append(_issue_global("reference_sequence", "reference entry", "条目缺少序号。", "应使用连续的[序号]，并符合规范2.7.2和2.7.3。", "references", f"paragraph {idx}", text[:120]))
+        if number_match:
+            current = {
+                "start_idx": idx,
+                "number": int(number_match.group(1)),
+                "parts": [text],
+            }
+            entries.append(current)
             continue
-        current_no = int(number_match.group(1))
+        if current is None:
+            issues.append(_issue_global("reference_entry_number_missing", "reference entry", "条目缺少序号。", "参考文献条目应以连续[序号]开头。", "references", f"paragraph {idx}", text[:120]))
+            continue
+        current["parts"].append(text)
+        issues.append(_issue_global("reference_entry_continuation_review", "reference entry continuation", "疑似参考文献续行，需要人工确认。", "参考文献续行应与上一条合并核对著录格式。", "references", f"paragraph {idx}", text[:120]))
+    return entries, issues
+
+
+def collect_reference_issues(document: Document) -> list[Issue]:
+    issues: list[Issue] = []
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    entries, entry_issues = _reference_entries_from_regions(document.paragraphs, texts, regions)
+    issues.extend(entry_issues)
+    expected_no = 1
+    for entry in entries:
+        idx = int(entry["start_idx"])
+        text = " ".join(str(x).strip() for x in entry["parts"]).strip()
+        current_no = int(entry["number"])
         if current_no != expected_no:
             issues.append(_issue_global("reference_sequence", "reference entry", f"序号不连续：期望[{expected_no}]，实际[{current_no}]。", "应使用连续的[序号]，并符合规范2.7.2和2.7.3。", "references", f"paragraph {idx}", text[:120]))
             expected_no = current_no
         expected_no += 1
 
-        marker_match = re.search(r"\[\s*([A-Z]+(?:/[A-Z]+)?)\s*\]", text)
-        marker = marker_match.group(1) if marker_match else None
+        marker = _reference_type_marker(text)
         if marker is None:
             issues.append(_issue_global("reference_type_marker", "reference entry", "缺少文献类型标识（如[M]/[J]/[D]/[EB/OL]）。", "应包含类型标识并符合规范2.7.2和2.7.3。", "references", f"paragraph {idx}", text[:120]))
-        else:
-            if marker == "J" and (re.search(r"(19|20)\d{2}", text) is None or (re.search(r"\d+\s*[:：]\s*\d+", text) is None and re.search(r"\d+[-–]\d+", text) is None)):
-                issues.append(_issue_global("reference_entry_format", "reference entry", "期刊文献[J]疑似缺少年份或卷期/页码。", "期刊文献应包含期刊名、年份、卷期与页码（启发式检查，需人工确认）。", "references", f"paragraph {idx}", text[:120]))
-            if marker == "D" and (re.search(r"(19|20)\d{2}", text) is None or ("大学" not in text and "学校" not in text)):
-                issues.append(_issue_global("reference_entry_format", "reference entry", "学位论文[D]疑似缺少学校信息或年份。", "学位论文应包含学校、所在地与年份（启发式检查，需人工确认）。", "references", f"paragraph {idx}", text[:120]))
-            if marker == "EB/OL":
-                if "[引用日期]" not in text and re.search(r"\[[0-9]{4}[-/年]", text) is None:
-                    issues.append(_issue_global("reference_online_access", "reference entry", "电子资源[EB/OL]缺少引用日期。", "应补充[引用日期]、获取和访问路径、数字对象唯一标识符。", "references", f"paragraph {idx}", text[:120]))
-                if re.search(r"https?://|doi", text, re.I) is None:
-                    issues.append(_issue_global("reference_online_access", "reference entry", "电子资源[EB/OL]缺少访问路径或DOI。", "应补充[引用日期]、获取和访问路径、数字对象唯一标识符。", "references", f"paragraph {idx}", text[:120]))
+        matched_formats, missing_map = _matches_any_272_format(text, marker)
+        if marker and marker in REFERENCE_272_FORMATS and marker not in matched_formats:
+            template = str(REFERENCE_272_FORMATS[marker]["template_text"])
+            missing_elements = "、".join(missing_map.get(marker, [])) or "未识别完整要素"
+            issues.append(
+                _issue_global(
+                    "reference_272_type_format_mismatch",
+                    "reference entry 2.7.2 type format",
+                    f"当前条目类型标识为[{marker}]，但缺失要素：{missing_elements}。",
+                    "该条目应符合其文献类型标识对应的 2.7.2 著录格式。",
+                    "references",
+                    f"paragraph {idx}",
+                    text[:200],
+                )
+            )
+            issues.append(
+                _issue_global(
+                    "reference_entry_format",
+                    "reference entry",
+                    f"类型[{marker}]建议模板：{template}",
+                    "该检查为启发式检查，需人工确认。",
+                    "references",
+                    f"paragraph {idx}",
+                    text[:200],
+                )
+            )
 
-        if re.search(r"https?://|doi", text, re.I) and "[引用日期]" not in text and re.search(r"\[[0-9]{4}[-/年]", text) is None:
-            issues.append(_issue_global("reference_online_access", "reference entry", "条目含URL/DOI但缺少引用日期。", "网上来源应补充[引用日期]、访问路径与唯一标识符。", "references", f"paragraph {idx}", text[:120]))
+        if not matched_formats:
+            tried = "/".join([k for k in REFERENCE_272_FORMATS.keys()])
+            missing_summary = "; ".join(
+                f"{k}: {('、'.join(v) if v else '要素未完整匹配')}" for k, v in missing_map.items()
+            )
+            issues.append(
+                _issue_global(
+                    "reference_272_format_no_match",
+                    "reference entry 2.7.2 format",
+                    f"当前条目未匹配 {tried} 任一种格式；类型标识={marker or '无'}；缺失要素：{missing_summary}",
+                    "参考文献条目应符合 2.7.2 中至少一种主要参考文献著录格式。",
+                    "references",
+                    f"paragraph {idx}",
+                    text[:220],
+                )
+            )
 
-        author_prefix = text.split(".", 1)[0]
-        if author_prefix.count(",") >= 3 and "等" not in text:
-            issues.append(_issue_global("reference_author_et_al", "reference entry", "作者人数疑似超过3人但未标注“等”（启发式）。", "多人作者建议写前3位，3人以上在后加“等”，需人工确认。", "references", f"paragraph {idx}", text[:120]))
+        online_source = _has_online_path(text)
+        if online_source and not _has_citation_date(text):
+            issues.append(_issue_global("reference_273_online_access_missing", "reference entry 2.7.3 online access", "条目含在线来源特征(URL/DOI)但缺少[引用日期]。", "网上获取文献应补充[引用日期]、获取和访问路径、DOI或数字对象唯一标识符。", "references", f"paragraph {idx}", text[:200]))
+        if marker == "EB/OL" and not _has_online_path(text):
+            issues.append(_issue_global("reference_273_online_access_missing", "reference entry 2.7.3 online access", "电子资源[EB/OL]缺少访问路径。", "电子资源应包含获取和访问路径，并建议标注DOI或唯一标识符。", "references", f"paragraph {idx}", text[:200]))
+
+        head_part = text.split(".", 1)[0]
+        author_items = [x.strip() for x in re.split(r"[，,、;；]|(?:\band\b)|&", head_part) if x.strip()]
+        if len(author_items) >= 4 and ("等" not in head_part and "et al" not in text.lower()):
+            issues.append(_issue_global("reference_273_author_et_al", "reference entry 2.7.3 author list", "责任者疑似超过3人但未标注“等”或“et al.”。", "多人作者建议列前3位后加“等”；该检查为启发式，需人工确认。", "references", f"paragraph {idx}", text[:200]))
+        if "等" in head_part and len(author_items) < 3:
+            issues.append(_issue_global("reference_273_author_et_al", "reference entry 2.7.3 author list", "责任者包含“等”，但前置作者数量疑似不足3位。", "作者数量与“等”用法需人工确认；该检查为启发式。", "references", f"paragraph {idx}", text[:200]))
     return issues
 
 
