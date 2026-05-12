@@ -107,6 +107,7 @@ class Rule:
     line_spacing_pt: float | None = 20
     first_line_indent_cm: float | None = None
     first_line_indent_chars: float | None = None
+    hanging_indent_chars: float | None = None
     space_before_pt: float | None = None
     space_after_pt: float | None = None
     space_before_lines: float | None = None
@@ -270,6 +271,7 @@ def _rule_from_config(key: str, data: dict[str, object]) -> Rule:
         line_spacing_pt=data.get("line_spacing_pt") if data.get("line_spacing_pt") is None else float(data.get("line_spacing_pt")),
         first_line_indent_cm=data.get("first_line_indent_cm") if data.get("first_line_indent_cm") is None else float(data.get("first_line_indent_cm")),
         first_line_indent_chars=data.get("first_line_indent_chars") if data.get("first_line_indent_chars") is None else float(data.get("first_line_indent_chars")),
+        hanging_indent_chars=data.get("hanging_indent_chars") if data.get("hanging_indent_chars") is None else float(data.get("hanging_indent_chars")),
         space_before_pt=data.get("space_before_pt") if data.get("space_before_pt") is None else float(data.get("space_before_pt")),
         space_after_pt=data.get("space_after_pt") if data.get("space_after_pt") is None else float(data.get("space_after_pt")),
         space_before_lines=data.get("space_before_lines") if data.get("space_before_lines") is None else float(data.get("space_before_lines")),
@@ -836,6 +838,40 @@ def first_line_indent_chars(paragraph) -> float | None:
     return None
 
 
+def hanging_indent_chars(paragraph) -> float | None:
+    ppr = paragraph._p.pPr
+    if ppr is not None:
+        ind = ppr.find(qn("w:ind"))
+        if ind is not None:
+            value = ind.get(qn("w:hangingChars"))
+            if value is not None:
+                return float(value) / 100
+    if paragraph.style is not None:
+        style_ppr = paragraph.style._element.pPr
+        if style_ppr is not None:
+            ind = style_ppr.find(qn("w:ind"))
+            if ind is not None:
+                value = ind.get(qn("w:hangingChars"))
+                if value is not None:
+                    return float(value) / 100
+    return None
+
+
+def has_twips_hanging_indent(paragraph) -> bool:
+    ppr = paragraph._p.pPr
+    if ppr is not None:
+        ind = ppr.find(qn("w:ind"))
+        if ind is not None and ind.get(qn("w:hanging")) is not None:
+            return True
+    if paragraph.style is not None:
+        style_ppr = paragraph.style._element.pPr
+        if style_ppr is not None:
+            ind = style_ppr.find(qn("w:ind"))
+            if ind is not None and ind.get(qn("w:hanging")) is not None:
+                return True
+    return False
+
+
 def _set_first_line_indent_chars(paragraph, chars: float) -> None:
     ppr = paragraph._p.get_or_add_pPr()
     ind = ppr.find(qn("w:ind"))
@@ -847,6 +883,19 @@ def _set_first_line_indent_chars(paragraph, chars: float) -> None:
         if qattr in ind.attrib:
             del ind.attrib[qattr]
     ind.set(qn("w:firstLineChars"), str(int(round(chars * 100))))
+
+
+def _set_hanging_indent_chars(paragraph, chars: float) -> None:
+    ppr = paragraph._p.get_or_add_pPr()
+    ind = ppr.find(qn("w:ind"))
+    if ind is None:
+        ind = OxmlElement("w:ind")
+        ppr.append(ind)
+    for attr in ("w:hanging", "w:hangingChars"):
+        qattr = qn(attr)
+        if qattr in ind.attrib:
+            del ind.attrib[qattr]
+    ind.set(qn("w:hangingChars"), str(int(round(chars * 100))))
 
 
 def spacing_before_after_pt(paragraph) -> tuple[float | None, float | None]:
@@ -924,6 +973,12 @@ def paragraph_format_differences(paragraph, rule: Rule | None) -> list[str]:
     actual_indent_chars = first_line_indent_chars(paragraph)
     if rule.first_line_indent_chars is not None and not approx(actual_indent_chars, rule.first_line_indent_chars, tolerance=0.02):
         differences.append(f"首行缩进：当前 {value_label(actual_indent_chars, '字符')}，应为 {rule.first_line_indent_chars}字符")
+    actual_hanging_chars = hanging_indent_chars(paragraph)
+    if rule.hanging_indent_chars is not None and not approx(actual_hanging_chars, rule.hanging_indent_chars, tolerance=0.02):
+        if has_twips_hanging_indent(paragraph):
+            differences.append(f"悬挂缩进：当前检测到长度单位悬挂缩进（w:hanging），应为 Word 字符单位 {rule.hanging_indent_chars} 字符（w:hangingChars）。")
+        else:
+            differences.append(f"悬挂缩进：当前 {value_label(actual_hanging_chars, '字符')}，应为 {rule.hanging_indent_chars}字符（w:hangingChars）。")
     before, after = spacing_before_after_pt(paragraph)
     if rule.space_before_pt is not None and not approx(before, rule.space_before_pt):
         differences.append(f"段前：当前 {value_label(before, 'pt')}，应为 {rule.space_before_pt}pt")
@@ -947,6 +1002,7 @@ def current_format(paragraph, rule: Rule | None = None) -> str:
     line_spacing = line_spacing_value.pt if hasattr(line_spacing_value, "pt") else None
     first_indent = first_line_indent_cm(paragraph)
     first_indent_chars = first_line_indent_chars(paragraph)
+    hanging_chars = hanging_indent_chars(paragraph)
     before, after = spacing_before_after_pt(paragraph)
     before_lines, after_lines = spacing_before_after_lines(paragraph)
     parts = [
@@ -958,6 +1014,7 @@ def current_format(paragraph, rule: Rule | None = None) -> str:
         f"对齐方式：{align}",
         f"固定行距：{value_label(round(line_spacing, 2) if line_spacing is not None else None, '磅')}",
         f"首行缩进：{value_label(first_indent_chars, '字符') if first_indent_chars is not None else value_label(round(first_indent, 2) if first_indent is not None else None, 'cm')}",
+        f"悬挂缩进：{value_label(hanging_chars, '字符')}",
         f"段前：{value_label(before_lines, '行') if before_lines is not None else value_label(before, 'pt')}",
         f"段后：{value_label(after_lines, '行') if after_lines is not None else value_label(after, 'pt')}",
     ]
@@ -1002,6 +1059,12 @@ def paragraph_matches(paragraph, rule: Rule) -> bool:
         actual_indent_chars = first_line_indent_chars(paragraph)
         if not approx(actual_indent_chars, rule.first_line_indent_chars, tolerance=0.02):
             return False
+    if rule.hanging_indent_chars is not None:
+        actual_hanging_chars = hanging_indent_chars(paragraph)
+        if not approx(actual_hanging_chars, rule.hanging_indent_chars, tolerance=0.02):
+            return False
+        if has_twips_hanging_indent(paragraph):
+            return False
     before, after = spacing_before_after_pt(paragraph)
     if rule.space_before_pt is not None and not approx(before, rule.space_before_pt):
         return False
@@ -1035,6 +1098,8 @@ def apply_rule(paragraph, rule: Rule) -> None:
         pf.first_line_indent = Cm(rule.first_line_indent_cm)
     if rule.first_line_indent_chars is not None:
         _set_first_line_indent_chars(paragraph, rule.first_line_indent_chars)
+    if rule.hanging_indent_chars is not None:
+        _set_hanging_indent_chars(paragraph, rule.hanging_indent_chars)
     if rule.space_before_pt is not None:
         pf.space_before = Pt(rule.space_before_pt)
     if rule.space_after_pt is not None:

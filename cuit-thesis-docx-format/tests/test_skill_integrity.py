@@ -189,6 +189,36 @@ class SkillIntegrityTests(unittest.TestCase):
                 self.assertIsNone(ind.get(module.qn("w:firstLine")))
                 self.assertTrue(module.paragraph_matches(paragraph, rule))
 
+    def test_reference_entry_uses_word_hanging_indent_chars_not_twips(self):
+        module = self.load_checker_module()
+        document = module.Document()
+        paragraph = document.add_paragraph("[1] 作者. 题名[J]. 期刊名, 2020, 12(3): 15-20.")
+        rule = module.RULES["reference_entry"]
+
+        module.apply_rule(paragraph, rule)
+
+        ind = paragraph._p.get_or_add_pPr().find(module.qn("w:ind"))
+        self.assertEqual(ind.get(module.qn("w:hangingChars")), "200")
+        self.assertIsNone(ind.get(module.qn("w:hanging")))
+        self.assertTrue(module.paragraph_matches(paragraph, rule))
+
+    def test_reference_entry_twips_hanging_is_not_strictly_accepted(self):
+        module = self.load_checker_module()
+        document = module.Document()
+        paragraph = document.add_paragraph("[1] 作者. 题名[J]. 期刊名, 2020, 12(3): 15-20.")
+        rule = module.RULES["reference_entry"]
+
+        ppr = paragraph._p.get_or_add_pPr()
+        ind = ppr.find(module.qn("w:ind"))
+        if ind is None:
+            ind = module.OxmlElement("w:ind")
+            ppr.append(ind)
+        ind.set(module.qn("w:hanging"), "420")
+        if module.qn("w:hangingChars") in ind.attrib:
+            del ind.attrib[module.qn("w:hangingChars")]
+
+        self.assertFalse(module.paragraph_matches(paragraph, rule))
+
     def test_toc_indents_match_specification(self):
         module = self.load_checker_module()
 
