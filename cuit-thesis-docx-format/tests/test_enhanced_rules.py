@@ -660,4 +660,125 @@ def test_remove_toc_field_placeholder_blank_after_english_keywords():
     texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
     key_idx = texts.index("Key words: Data visualization")
     body_idx = texts.index("1 引 言")
-    assert body_idx == key_idx + 1
+    assert body_idx > key_idx + 1
+
+
+def test_keywords_cleanup_does_not_cross_toc_to_body():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("ABSTRACT")
+    doc.add_paragraph("English abstract body")
+    doc.add_paragraph("Key words: alpha; beta")
+    toc_holder = doc.add_paragraph("")
+    toc_holder.add_run()._r.append(mod.OxmlElement("w:fldChar"))
+    doc.add_paragraph("1 引 言")
+    doc.add_paragraph("随着 COVID-19 疫情发展，正文开始。")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en", "abstract_en", "abstract_en", "abstract_en", "body", "body"]}
+    issues, _ = mod.cleanup_module_boundary_blank_paragraphs(doc, apply_changes=True)
+    texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
+    assert "" in texts
+    intro = next(p for p in doc.paragraphs if mod.paragraph_text(p).strip() == "1 引 言")
+    assert intro.paragraph_format.page_break_before is not True
+    assert intro._p.pPr is None or intro._p.pPr.find(mod.qn("w:sectPr")) is None
+    assert any(x.rule_key == "abstract_boundary_cleanup_crossed_toc" for x in issues)
+
+
+def test_keywords_cleanup_only_targets_toc():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("Key words: alpha; beta")
+    doc.add_paragraph("   ")
+    doc.add_paragraph("目 录")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en", "abstract_en", "toc"]}
+    mod.cleanup_module_boundary_blank_paragraphs(doc, apply_changes=True)
+    texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
+    assert "目 录" in texts
+    assert texts == ["Key words: alpha; beta", "目 录"]
+
+
+def test_keywords_cleanup_stops_before_body():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("Key words: alpha; beta")
+    doc.add_paragraph("   ")
+    doc.add_paragraph("1 引 言")
+    doc.add_paragraph("正文第一段。")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en", "abstract_en", "body", "body"]}
+    issues, _ = mod.cleanup_module_boundary_blank_paragraphs(doc, apply_changes=True)
+    intro = doc.paragraphs[2]
+    assert intro.paragraph_format.page_break_before is not True
+    assert any(x.rule_key == "abstract_boundary_cleanup_crossed_toc" for x in issues)
+
+
+def test_remove_blank_after_chapter_title():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("1 引 言")
+    doc.add_paragraph(" ")
+    body = doc.add_paragraph("随着 COVID-19 疫情，正文内容开始。")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["body", "body", "body"]}
+    _issues, removed = mod.cleanup_body_heading_following_blank_paragraphs(doc, apply_changes=True)
+    texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
+    assert removed >= 1
+    assert texts == ["1 引 言", "随着 COVID-19 疫情，正文内容开始。"]
+    assert body.paragraph_format.page_break_before is not True
+
+
+def test_remove_page_break_after_chapter_title():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("1 引 言")
+    blank = doc.add_paragraph("")
+    br = mod.OxmlElement("w:br")
+    br.set(mod.qn("w:type"), "page")
+    blank.add_run()._r.append(br)
+    body = doc.add_paragraph("正文第一段。")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["body", "body", "body"]}
+    _issues, _removed = mod.cleanup_body_heading_following_blank_paragraphs(doc, apply_changes=True)
+    texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
+    assert texts == ["1 引 言", "正文第一段。"]
+    assert body.paragraph_format.page_break_before is not True
+
+
+def test_post_layout_cleanup_reruns_renderer_when_changed():
+    mod = load_module()
+    calls = {"save": 0}
+
+    class DummyDoc:
+        def __init__(self, *_args, **_kwargs):
+            self.paragraphs = []
+            self.sections = []
+            self.inline_shapes = []
+            self._element = type("E", (), {"xml": ""})()
+
+        def save(self, *_args, **_kwargs):
+            return None
+
+    def fake_try_com_save(_path, _renderer):
+        calls["save"] += 1
+        return "office"
+
+    mod.require_docx_dependencies = lambda: None
+    mod.is_docx = lambda _p: True
+    mod.Document = DummyDoc
+    mod.normalize_document_structure = lambda _d: None
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": [], "warnings": []}
+    mod.collect_issues = lambda _d: []
+    mod.create_annotated_docx = lambda *_args, **_kwargs: None
+    mod.probe_com_renderer = lambda _r: "office"
+    mod.apply_supported_rules = lambda *_args, **_kwargs: None
+    mod.try_com_save = fake_try_com_save
+    mod.cleanup_visible_blank_paragraphs_after_layout = lambda _d: ([], True)
+    mod.attach_after_formats = lambda *_args, **_kwargs: None
+    mod.attach_screenshots = lambda **_kwargs: ("skipped", None)
+    mod.write_html_report = lambda *_args, **_kwargs: None
+    mod.compute_section_boundary_findings = lambda *_args, **_kwargs: ([], [])
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        docx = base / "a.docx"
+        docx.write_bytes(b"pk")
+        out = base / "out"
+        report = mod.run(docx, out, "auto", "never")
+        assert report["post_layout_cleanup_changed"] is True
+        assert calls["save"] == 3
