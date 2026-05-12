@@ -59,6 +59,7 @@ Source: `paper-format/成都信息工程大学学士学位论文规范.docx`
 
 - `参考文献`: same as chapter title, Songti 16 pt, bold.
 - Reference entries: Songti 12 pt; English and numerals Times New Roman 12 pt; exact line spacing 20 pt; hanging indent 2 characters.
+- Reference entries use Word hanging indent of 2 characters (`w:hangingChars="200"`), not centimeter approximation.
 - Reference entries should also follow section 2.7.2 major bibliographic templates. The checker performs heuristic matching for `[M]/[C]/[R]/[D]/[P]/[S]/[J]/[N]/[EB/OL]` and extracted references (`//`).
 - If an entry does not match any 2.7.2 template, the report raises `reference_272_format_no_match`.
 - If an entry has a type marker but lacks corresponding required elements, the report raises `reference_272_type_format_mismatch`.
