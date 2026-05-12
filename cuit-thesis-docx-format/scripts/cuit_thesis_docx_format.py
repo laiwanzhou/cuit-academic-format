@@ -734,6 +734,17 @@ def _apply_text_to_runs(paragraph, new_text: str) -> None:
         cursor += take
 
 
+def _replace_paragraph_runs(paragraph, parts: list[tuple[str, bool | None]]) -> None:
+    for run in list(paragraph.runs):
+        run._element.getparent().remove(run._element)
+    for text, bold in parts:
+        if text == "":
+            continue
+        run = paragraph.add_run(text)
+        if bold is not None:
+            run.bold = bold
+
+
 def run_format_summary(run, paragraph) -> str:
     fmt = run_effective_format(run, paragraph)
     return (
@@ -1416,14 +1427,38 @@ def normalize_english_abstract_title(document: Document) -> None:
             if tail:
                 heading = paragraph.insert_paragraph_before("ABSTRACT")
                 apply_rule(heading, RULES["abstract_title_en"])
-                _apply_text_to_runs(paragraph, tail)
+                _replace_paragraph_runs(paragraph, [(tail, False)])
                 apply_rule(paragraph, RULES["abstract_body_en"])
             else:
-                _apply_text_to_runs(paragraph, "ABSTRACT")
+                _replace_paragraph_runs(paragraph, [("ABSTRACT", True)])
                 apply_rule(paragraph, RULES["abstract_title_en"])
             continue
         if re.match(r"^abstract\s*$", stripped, re.I):
-            _apply_text_to_runs(paragraph, "ABSTRACT")
+            _replace_paragraph_runs(paragraph, [("ABSTRACT", True)])
+
+
+def normalize_keywords_label_runs(document: Document) -> None:
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    for idx, paragraph in enumerate(document.paragraphs):
+        if idx >= len(regions) or regions[idx] not in {"abstract_zh", "abstract_en"}:
+            continue
+        stripped = paragraph_text(paragraph).strip()
+        if not stripped:
+            continue
+        zh = re.match(r"^\s*(关键词)\s*[:：]\s*(.*)$", stripped)
+        en = re.match(r"^\s*(Key\s*words)\s*[:：]\s*(.*)$", stripped, re.I)
+        if zh:
+            tail = zh.group(2).strip()
+            label = "关键词："
+            body = f"{tail}" if tail else ""
+            _replace_paragraph_runs(paragraph, [(label, True), (body, False)])
+            continue
+        if en:
+            tail = en.group(2).strip()
+            label = "Key words: "
+            body = f"{tail}" if tail else ""
+            _replace_paragraph_runs(paragraph, [(label, True), (body, False)])
 
 
 def _is_plain_blank_paragraph(paragraph) -> bool:
@@ -1547,8 +1582,6 @@ def _blank_paragraph_has_risky_nodes(paragraph) -> bool:
     risky_tags = {
         qn("w:fldChar"),
         qn("w:instrText"),
-        qn("w:bookmarkStart"),
-        qn("w:bookmarkEnd"),
         qn("w:drawing"),
         qn("w:object"),
         qn("w:pict"),
@@ -1604,6 +1637,16 @@ def remove_target_empty_paragraphs(document: Document, removable: list[int]) -> 
             paragraph._element.getparent().remove(paragraph._element)
             removed += 1
     return removed
+
+
+def normalize_document_structure(document: Document) -> None:
+    ensure_abstract_heading_split(document)
+    normalize_english_abstract_title(document)
+    normalize_keywords_label_runs(document)
+    remove_sectpr_only_blank_placeholders(document)
+    remove_redundant_front_blank_paragraphs(document)
+    _empty_issues, to_remove = collect_empty_paragraph_issues(document)
+    remove_target_empty_paragraphs(document, to_remove)
 
 
 def apply_page_setup(document: Document, allow_layout_fixes: bool) -> None:
@@ -2467,8 +2510,6 @@ def collect_issues(document: Document) -> list[Issue]:
 
 
 def apply_supported_rules(document: Document, allow_layout_fixes: bool) -> None:
-    ensure_abstract_heading_split(document)
-    normalize_english_abstract_title(document)
     apply_page_setup(document, allow_layout_fixes=allow_layout_fixes)
     texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
     structure = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))
@@ -2485,8 +2526,6 @@ def apply_supported_rules(document: Document, allow_layout_fixes: bool) -> None:
                 normalized_text = normalize_body_cjk_spacing(paragraph.text)
                 if normalized_text != paragraph.text:
                     _apply_text_to_runs(paragraph, normalized_text)
-    _empty_issues, to_remove = collect_empty_paragraph_issues(document)
-    remove_target_empty_paragraphs(document, to_remove)
     enforce_image_height_limit(document)
 
 
@@ -3172,6 +3211,8 @@ def attach_after_formats(fixed_path: Path, issues: list[Issue]) -> None:
         if 0 <= issue.paragraph_index < len(fixed_doc.paragraphs):
             rule_key = issue.rule_key.removesuffix("_runs")
             issue.after = current_format(fixed_doc.paragraphs[issue.paragraph_index], RULES.get(rule_key))
+        elif issue.paragraph_index >= 0:
+            issue.after = "结构修改后段落位置改变，无法可靠定位修改后状态。"
 
 
 def issue_dict(issue: Issue) -> dict[str, object]:
@@ -3347,16 +3388,22 @@ def run(
     html_report_path = output_dir / f"{input_path.stem}_format_report.html"
 
     source_doc = Document(str(input_path))
-    source_texts = [paragraph_text(paragraph) for paragraph in source_doc.paragraphs]
-    structure_analysis = analyze_section_sequence(source_texts, has_toc_field=document_has_toc_field(source_doc))
-    issues = collect_issues(source_doc)
-    create_annotated_docx(input_path, comments_path, issues)
+    normalize_document_structure(source_doc)
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir) / f"{input_path.stem}_normalized.docx"
+        source_doc.save(str(temp_path))
 
-    planned_renderer = probe_com_renderer(renderer)
-    allow_layout_fixes = planned_renderer in {"office", "wps"} or allow_ooxml_layout_fixes
-    fixed_doc = Document(str(input_path))
-    apply_supported_rules(fixed_doc, allow_layout_fixes=allow_layout_fixes)
-    fixed_doc.save(str(fixed_path))
+        normalized_doc = Document(str(temp_path))
+        source_texts = [paragraph_text(paragraph) for paragraph in normalized_doc.paragraphs]
+        structure_analysis = analyze_section_sequence(source_texts, has_toc_field=document_has_toc_field(normalized_doc))
+        issues = collect_issues(normalized_doc)
+        create_annotated_docx(temp_path, comments_path, issues)
+
+        planned_renderer = probe_com_renderer(renderer)
+        allow_layout_fixes = planned_renderer in {"office", "wps"} or allow_ooxml_layout_fixes
+        fixed_doc = Document(str(temp_path))
+        apply_supported_rules(fixed_doc, allow_layout_fixes=allow_layout_fixes)
+        fixed_doc.save(str(fixed_path))
     fixed_renderer = try_com_save(fixed_path, renderer)
     comments_renderer = try_com_save(comments_path, renderer)
     attach_after_formats(fixed_path, issues)
@@ -3369,7 +3416,7 @@ def run(
         mode=screenshots,
     )
 
-    _header_start, header_reason = find_header_start_section(source_doc)
+    _header_start, header_reason = find_header_start_section(normalized_doc)
     advisory = [
         "Semantic correctness of cover fields is not checked.",
         "Bibliographic content validity is not fully checked.",
@@ -3398,6 +3445,24 @@ def run(
             "OOXML high-risk layout fixes were explicitly enabled. Verify headers, footers, page numbers, section breaks, and pagination in Word/WPS before using the fixed document."
         )
 
+    resolved_issue_count = sum(
+        1
+        for issue in issues
+        if issue.after is not None
+        and "疑似不符合项：" not in issue.after
+        and "无法可靠定位修改后状态" not in issue.after
+    )
+    remaining_issue_count = sum(
+        1
+        for issue in issues
+        if issue.after is None
+        or "疑似不符合项：" in (issue.after or "")
+        or "无法可靠定位修改后状态" in (issue.after or "")
+    )
+    manual_review_count = sum(
+        1 for issue in issues if "人工确认" in (issue.message or "") or "人工确认" in (issue.current or "")
+    )
+
     report = {
         "input": str(input_path.resolve()),
         "annotated_docx": str(comments_path.resolve()),
@@ -3406,6 +3471,10 @@ def run(
         "html_report": str(html_report_path.resolve()),
         "issue_count": len(issues),
         "modification_count": len(issues),
+        "resolved_issue_count": resolved_issue_count,
+        "remaining_issue_count": remaining_issue_count,
+        "manual_review_count": manual_review_count,
+        "issue_count_note": "issue_count 表示发现并尝试处理的问题数，不等同于修复后剩余问题数。",
         "issue_summary_by_category": summarize_issues(issues),
         "renderer_for_fixed": fixed_renderer,
         "renderer_for_comments": comments_renderer,

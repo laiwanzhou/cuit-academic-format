@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -276,6 +277,59 @@ def test_english_abstract_title_split_applies_rules():
     mod.normalize_english_abstract_title(doc)
     assert mod.paragraph_matches(doc.paragraphs[0], mod.RULES["abstract_title_en"])
     assert mod.paragraph_matches(doc.paragraphs[1], mod.RULES["abstract_body_en"])
+    assert all(run.bold is not True for run in doc.paragraphs[1].runs if run.text.strip())
+
+
+def test_chinese_abstract_split_does_not_keep_bold_prefix():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("摘要：随着新冠肺炎疫情发展，研究持续推进。")
+    mod.ensure_abstract_heading_split(doc)
+    assert doc.paragraphs[0].text == "摘 要"
+    assert "摘要：" not in doc.paragraphs[1].text
+    assert all(run.bold is not True for run in doc.paragraphs[1].runs if run.text.strip())
+
+
+def test_keywords_label_bold_content_not_bold():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("关键词：数据可视化；机器学习")
+    doc.add_paragraph("Key words：Data visualization; Machine Learning")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_zh", "abstract_en"]}
+    mod.normalize_keywords_label_runs(doc)
+    zh_runs = [r for r in doc.paragraphs[0].runs if r.text]
+    en_runs = [r for r in doc.paragraphs[1].runs if r.text]
+    assert zh_runs[0].bold is True
+    assert all(run.bold is not True for run in zh_runs[1:])
+    assert en_runs[0].bold is True
+    assert all(run.bold is not True for run in en_runs[1:])
+
+
+def test_after_formats_not_shifted_after_structure_normalization():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("摘要：这是中文摘要正文。")
+    doc.add_paragraph("关键词：数据可视化；机器学习")
+    doc.add_paragraph("Abstract: With the outbreak and spread of COVID-19...")
+    doc.add_paragraph("Key words: Data visualization; Machine Learning")
+    doc.add_paragraph("目 录")
+    doc.add_paragraph("1 引 言")
+    doc.add_paragraph("1.1 课题背景")
+    doc.add_paragraph("这是正文段落。")
+    mod.normalize_document_structure(doc)
+    issues = mod.collect_issues(doc)
+    mod.apply_supported_rules(doc, allow_layout_fixes=False)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out.docx"
+        doc.save(str(out))
+        mod.attach_after_formats(out, issues)
+    for issue in issues:
+        if issue.rule_key == "abstract_body_en" and issue.after:
+            assert "toc 1" not in issue.after
+        if issue.rule_key in {"keywords_en", "keywords_en_runs"} and issue.after:
+            assert "Heading 1" not in issue.after
+        if issue.rule_key in {"chapter_title", "chapter_title_runs"} and issue.after:
+            assert "Heading 2" not in issue.after
 
 
 def test_body_abstract_word_not_reported_as_title():
