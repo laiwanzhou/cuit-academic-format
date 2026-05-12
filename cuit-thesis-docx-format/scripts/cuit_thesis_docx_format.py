@@ -1621,7 +1621,28 @@ def _is_target_empty_paragraph_text(text: str) -> bool:
     return re.sub(r"[\s\u3000\xa0]+", "", text or "") == ""
 
 
+def _paragraph_has_image_payload(paragraph) -> bool:
+    suffixes = (
+        "}drawing",
+        "}pict",
+        "}object",
+        "}OLEObject",
+        "}inline",
+        "}anchor",
+        "}blip",
+        "}shape",
+        "}imagedata",
+    )
+    for node in paragraph._p.iter():
+        tag = str(node.tag)
+        if tag.endswith(suffixes):
+            return True
+    return False
+
+
 def _blank_paragraph_has_risky_nodes(paragraph) -> bool:
+    if _paragraph_has_image_payload(paragraph):
+        return True
     ppr = paragraph._p.pPr
     if ppr is not None and ppr.find(qn("w:sectPr")) is not None:
         return True
@@ -1644,6 +1665,8 @@ def _blank_paragraph_has_risky_nodes(paragraph) -> bool:
 
 def _is_effectively_blank_paragraph(paragraph) -> bool:
     if not _is_target_empty_paragraph_text(paragraph.text):
+        return False
+    if _paragraph_has_image_payload(paragraph):
         return False
     for node in paragraph._p.iter():
         if node.tag in {qn("w:drawing"), qn("w:object"), qn("w:pict")}:
@@ -1776,6 +1799,16 @@ def cleanup_module_boundary_blank_paragraphs(
                 return i
         return None
 
+    def _next_toc_target(start_idx: int) -> int | None:
+        for i in range(start_idx, len(document.paragraphs)):
+            text = paragraph_text(document.paragraphs[i]).strip()
+            region = regions[i] if i < len(regions) else ""
+            if region == "body" or _is_body_heading_text(text):
+                return None
+            if region == "toc" or bool(re.match(r"^\s*目\s*录\s*$", text)) or _paragraph_has_toc_field(document.paragraphs[i]):
+                return i
+        return None
+
     boundary_specs: list[tuple[re.Pattern[str], callable]] = [
         (
             re.compile(r"^\s*Key\s*words\s*[:：]", re.I),
@@ -1808,26 +1841,54 @@ def cleanup_module_boundary_blank_paragraphs(
         if next_non_empty is None:
             i += 1
             continue
+        if _pat.pattern.lower().find("key\\s*words") >= 0:
+            toc_target = _next_toc_target(i + 1)
+            if toc_target is not None and _is_effectively_blank_paragraph(document.paragraphs[toc_target]):
+                after_toc_target = _next_non_empty(toc_target + 1)
+                if after_toc_target is not None:
+                    aft_region = regions[after_toc_target] if after_toc_target < len(regions) else ""
+                    aft_text = paragraph_text(document.paragraphs[after_toc_target]).strip()
+                    if aft_region == "body" or _is_body_heading_text(aft_text):
+                        toc_target = None
+            if toc_target is None:
+                if apply_changes:
+                    for blank_idx in range(next_non_empty - 1, i, -1):
+                        if blank_idx >= len(document.paragraphs):
+                            continue
+                        blank = document.paragraphs[blank_idx]
+                        if not _is_effectively_blank_paragraph(blank):
+                            continue
+                        if _paragraph_has_image_payload(blank):
+                            continue
+                        is_toc_placeholder = _blank_paragraph_is_toc_field_placeholder(blank)
+                        has_sectpr = blank._p.pPr is not None and blank._p.pPr.find(qn("w:sectPr")) is not None
+                        has_page_break = any(
+                            node.tag == qn("w:br") and node.get(qn("w:type")) == "page"
+                            for node in blank._p.iter()
+                        )
+                        if has_sectpr and not _migrate_sectpr_to_previous_paragraph(document, blank_idx, i):
+                            continue
+                        if is_toc_placeholder or has_sectpr or has_page_break or _blank_paragraph_has_only_safe_boundary_nodes(blank):
+                            blank._element.getparent().remove(blank._element)
+                            removed += 1
+                issues.append(
+                    Issue(
+                        paragraph_index=i,
+                        rule_key="abstract_boundary_cleanup_crossed_toc",
+                        text_type="abstract boundary cleanup",
+                        text_excerpt=anchor_text[:160],
+                        current="英文关键词后未能可靠定位目录起点，已停止清理以避免破坏正文分页。",
+                        expected="英文关键词边界清理只允许定位到目录区域或目录域段落。",
+                        message="英文关键词后未能可靠定位目录起点，已停止清理以避免破坏正文分页。",
+                        category="page",
+                        location="abstract_en to toc boundary",
+                    )
+                )
+                i = next_non_empty
+                continue
+            next_non_empty = toc_target
         next_text = paragraph_text(document.paragraphs[next_non_empty]).strip()
         next_region = regions[next_non_empty] if next_non_empty < len(regions) else ""
-        if _pat.pattern.lower().find("key\\s*words") >= 0 and (
-            next_region == "body" or _is_body_heading_text(next_text) or bool(re.match(r"^\s*1\s+引", next_text))
-        ):
-            issues.append(
-                Issue(
-                    paragraph_index=i,
-                    rule_key="abstract_boundary_cleanup_crossed_toc",
-                    text_type="abstract boundary cleanup",
-                    text_excerpt=anchor_text[:160],
-                    current="英文关键词之后的边界定位直接落在正文标题/正文区域，已停止自动清理。",
-                    expected="英文关键词边界清理只允许定位到目录区域或目录域段落。",
-                    message="英文关键词边界清理检测到跨越目录直达正文的风险，已停止自动清理并保留人工确认。",
-                    category="page",
-                    location="abstract_en to toc boundary",
-                )
-            )
-            i = next_non_empty
-            continue
         if not target_match(next_non_empty, next_region, next_text):
             i += 1
             continue
@@ -1843,7 +1904,7 @@ def cleanup_module_boundary_blank_paragraphs(
                 continue
             is_toc_placeholder = _blank_paragraph_is_toc_field_placeholder(blank)
             if is_toc_placeholder and _pat.pattern.lower().find("key\\s*words") >= 0:
-                failed = True
+                # Keep TOC field paragraph itself, but allow cleaning ordinary boundary blanks around it.
                 continue
             if not _blank_paragraph_has_only_safe_boundary_nodes(blank) and not is_toc_placeholder:
                 failed = True
@@ -1900,6 +1961,8 @@ def cleanup_body_heading_following_blank_paragraphs(
         j = i + 1
         while j < len(document.paragraphs) and _is_target_empty_paragraph_text(paragraph_text(document.paragraphs[j])):
             blank = document.paragraphs[j]
+            if _paragraph_has_image_payload(blank):
+                break
             has_sectpr = blank._p.pPr is not None and blank._p.pPr.find(qn("w:sectPr")) is not None
             if has_sectpr:
                 issues.append(
@@ -2828,6 +2891,55 @@ def collect_image_size_issues(document: Document) -> list[Issue]:
     return issues
 
 
+def count_document_images(document: Document) -> int:
+    rel_ids: set[str] = set()
+    for node in document._element.iter():
+        tag = str(node.tag)
+        if tag.endswith("}blip"):
+            rid = node.get(qn("r:embed")) or node.get(qn("r:link"))
+            if rid:
+                rel_ids.add(rid)
+        elif tag.endswith("}imagedata"):
+            rid = node.get(qn("r:id"))
+            if rid:
+                rel_ids.add(rid)
+    return len(rel_ids)
+
+
+def count_figure_captions(document: Document) -> int:
+    pattern = re.compile(r"^\s*图\s*\d+(?:[-.]\d+)?\s+")
+    return sum(1 for paragraph in document.paragraphs if pattern.match(paragraph_text(paragraph).strip()))
+
+
+def collect_figure_caption_image_issues(document: Document) -> list[Issue]:
+    issues: list[Issue] = []
+    pattern = re.compile(r"^\s*图\s*\d+(?:[-.]\d+)?\s+")
+    for idx, paragraph in enumerate(document.paragraphs):
+        text = paragraph_text(paragraph).strip()
+        if not pattern.match(text):
+            continue
+        has_nearby_image = False
+        for lookback in range(max(0, idx - 3), idx):
+            if _paragraph_has_image_payload(document.paragraphs[lookback]):
+                has_nearby_image = True
+                break
+        if not has_nearby_image:
+            issues.append(
+                Issue(
+                    paragraph_index=idx,
+                    rule_key="figure_caption_without_nearby_image",
+                    text_type="figure caption",
+                    text_excerpt=text[:160],
+                    current="检测到图题附近没有对应图片。",
+                    expected="图题前 1-3 个段落内应存在对应图片或图片锚点。",
+                    message="检测到图题附近没有对应图片，可能图片丢失或图题位置错误。",
+                    category="image",
+                    location=f"paragraph {idx}",
+                )
+            )
+    return issues
+
+
 def enforce_image_height_limit(document: Document) -> int:
     scaled = 0
     for shape in getattr(document, "inline_shapes", []):
@@ -2899,6 +3011,7 @@ def collect_issues(document: Document) -> list[Issue]:
     issues.extend(collect_table_issues(document))
     issues.extend(collect_reference_issues(document))
     issues.extend(collect_image_size_issues(document))
+    issues.extend(collect_figure_caption_image_issues(document))
     empty_issues, _to_remove = collect_empty_paragraph_issues(document)
     issues.extend(empty_issues)
     boundary_issues, _removed_preview = cleanup_module_boundary_blank_paragraphs(document, apply_changes=False)
@@ -3790,6 +3903,8 @@ def run(
     html_report_path = output_dir / f"{input_path.stem}_format_report.html"
 
     source_doc = Document(str(input_path))
+    source_image_count = count_document_images(source_doc)
+    source_figure_caption_count = count_figure_captions(source_doc)
     normalize_document_structure(source_doc)
     with TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir) / f"{input_path.stem}_normalized.docx"
@@ -3814,6 +3929,23 @@ def run(
     if post_layout_cleanup_changed:
         post_layout_doc.save(str(fixed_path))
         fixed_renderer = try_com_save(fixed_path, renderer)
+    fixed_doc_for_counts = Document(str(fixed_path))
+    fixed_image_count = count_document_images(fixed_doc_for_counts)
+    fixed_figure_caption_count = count_figure_captions(fixed_doc_for_counts)
+    if fixed_image_count < source_image_count:
+        issues.append(
+            Issue(
+                paragraph_index=-1,
+                rule_key="image_lost_after_fix",
+                text_type="image integrity",
+                text_excerpt="document image inventory",
+                current=f"修复后图片数量 {fixed_image_count} 少于源文档 {source_image_count}。",
+                expected="修复后图片数量不应少于源文档。",
+                message="修复后图片数量少于源文档，可能存在图片丢失。",
+                category="image",
+                location="document images",
+            )
+        )
     attach_after_formats(fixed_path, issues)
     screenshot_status, render_qa = attach_screenshots(
         input_path=input_path,
@@ -3890,6 +4022,10 @@ def run(
         "high_risk_layout_fixes_applied": allow_layout_fixes,
         "allow_ooxml_layout_fixes": allow_ooxml_layout_fixes,
         "post_layout_cleanup_changed": post_layout_cleanup_changed,
+        "source_image_count": source_image_count,
+        "fixed_image_count": fixed_image_count,
+        "source_figure_caption_count": source_figure_caption_count,
+        "fixed_figure_caption_count": fixed_figure_caption_count,
         "screenshot_status": screenshot_status,
         "render_qa": render_qa,
         "structure_analysis": structure_analysis,

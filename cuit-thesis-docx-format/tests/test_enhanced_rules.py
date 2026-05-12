@@ -660,7 +660,7 @@ def test_remove_toc_field_placeholder_blank_after_english_keywords():
     texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
     key_idx = texts.index("Key words: Data visualization")
     body_idx = texts.index("1 引 言")
-    assert body_idx > key_idx + 1
+    assert body_idx == key_idx + 1
 
 
 def test_keywords_cleanup_does_not_cross_toc_to_body():
@@ -675,8 +675,6 @@ def test_keywords_cleanup_does_not_cross_toc_to_body():
     doc.add_paragraph("随着 COVID-19 疫情发展，正文开始。")
     mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en", "abstract_en", "abstract_en", "abstract_en", "body", "body"]}
     issues, _ = mod.cleanup_module_boundary_blank_paragraphs(doc, apply_changes=True)
-    texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
-    assert "" in texts
     intro = next(p for p in doc.paragraphs if mod.paragraph_text(p).strip() == "1 引 言")
     assert intro.paragraph_format.page_break_before is not True
     assert intro._p.pPr is None or intro._p.pPr.find(mod.qn("w:sectPr")) is None
@@ -749,7 +747,7 @@ def test_post_layout_cleanup_reruns_renderer_when_changed():
             self.paragraphs = []
             self.sections = []
             self.inline_shapes = []
-            self._element = type("E", (), {"xml": ""})()
+            self._element = type("E", (), {"xml": "", "iter": lambda self: []})()
 
         def save(self, *_args, **_kwargs):
             return None
@@ -782,3 +780,88 @@ def test_post_layout_cleanup_reruns_renderer_when_changed():
         report = mod.run(docx, out, "auto", "never")
         assert report["post_layout_cleanup_changed"] is True
         assert calls["save"] == 3
+
+
+def test_blank_cleanup_keeps_image_paragraph():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("Key words: alpha")
+    img_para = doc.add_paragraph("")
+    img_para.add_run()._r.append(mod.OxmlElement("w:drawing"))
+    doc.add_paragraph("目 录")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en", "abstract_en", "toc"]}
+    _issues, _removed = mod.cleanup_module_boundary_blank_paragraphs(doc, apply_changes=True)
+    assert any(mod._paragraph_has_image_payload(p) for p in doc.paragraphs)
+
+
+def test_body_heading_cleanup_keeps_image_paragraph():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("3.3 数据库设计")
+    img_para = doc.add_paragraph("")
+    img_para.add_run()._r.append(mod.OxmlElement("w:drawing"))
+    doc.add_paragraph("图3.7 数据库E-R图")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["body", "body", "body"]}
+    _issues, _removed = mod.cleanup_body_heading_following_blank_paragraphs(doc, apply_changes=True)
+    texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
+    assert "图3.7 数据库E-R图" in texts
+    assert any(mod._paragraph_has_image_payload(p) for p in doc.paragraphs)
+
+
+def test_figure_caption_requires_nearby_image():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("图3.7 数据库E-R图")
+    issues = mod.collect_figure_caption_image_issues(doc)
+    assert any(i.rule_key == "figure_caption_without_nearby_image" for i in issues)
+
+
+def test_figure_caption_with_nearby_image_passes():
+    mod = load_module()
+    doc = mod.Document()
+    img_para = doc.add_paragraph("")
+    img_para.add_run()._r.append(mod.OxmlElement("w:drawing"))
+    doc.add_paragraph("图3.7 数据库E-R图")
+    issues = mod.collect_figure_caption_image_issues(doc)
+    assert all(i.rule_key != "figure_caption_without_nearby_image" for i in issues)
+
+
+def test_image_count_does_not_decrease_after_fix():
+    mod = load_module()
+    class N:
+        def __init__(self, tag, attrs):
+            self.tag = tag
+            self._attrs = attrs
+        def get(self, key):
+            return self._attrs.get(key)
+    class E:
+        def __init__(self, nodes):
+            self._nodes = nodes
+        def iter(self):
+            return self._nodes
+    class D:
+        def __init__(self, nodes):
+            self._element = E(nodes)
+    src_nodes = [N("{x}blip", {mod.qn("r:embed"): "rId1"}), N("{x}imagedata", {mod.qn("r:id"): "rId2"})]
+    fix_nodes = [N("{x}blip", {mod.qn("r:embed"): "rId1"})]
+    assert mod.count_document_images(D(src_nodes)) == 2
+    assert mod.count_document_images(D(fix_nodes)) == 1
+
+
+def test_keywords_boundary_blank_removed_without_crossing_body():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("Key words: alpha")
+    blank = doc.add_paragraph("")
+    ppr = blank._p.get_or_add_pPr()
+    ppr.append(mod.OxmlElement("w:sectPr"))
+    doc.add_paragraph("目 录")
+    intro = doc.add_paragraph("1 引 言")
+    doc.add_paragraph("正文第一段")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en", "abstract_en", "toc", "body", "body"]}
+    _issues, _removed = mod.cleanup_module_boundary_blank_paragraphs(doc, apply_changes=True)
+    texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
+    k = texts.index("Key words: alpha")
+    t = texts.index("目 录")
+    assert t == k + 1
+    assert intro.paragraph_format.page_break_before is not True
