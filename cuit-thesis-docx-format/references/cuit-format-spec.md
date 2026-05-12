@@ -18,7 +18,7 @@ Source: `paper-format/成都信息工程大学学士学位论文规范.docx`
 
 - Chinese and English abstract pages may retain the thesis title before the abstract heading. The heading itself must still be a standalone `摘 要` or `ABSTRACT` paragraph before the abstract body.
 - Chinese abstract title: `摘 要`, one space between the two characters, Songti 16 pt, bold, centered, before/after 0.5 line, exact line spacing 20 pt.
-- English abstract title: `ABSTRACT`, Times New Roman 14 pt, bold, centered, before/after 0.5 line.
+- English abstract title: must be a standalone `ABSTRACT` paragraph, all uppercase, Times New Roman 14 pt, bold, centered, before/after 0.5 line.
 - Chinese abstract body: Songti 12 pt, exact line spacing 20 pt.
 - English abstract body: Times New Roman 12 pt, exact line spacing 20 pt.
 - Keywords: same size as abstract body. `关键词` / `Key words` label should be bold. Keywords separated by semicolons.
@@ -42,6 +42,11 @@ Source: `paper-format/成都信息工程大学学士学位论文规范.docx`
 
 - Figure caption, such as `图2-1 XXX`: numbered by chapter, below the figure, Songti 10.5 pt, centered, exact line spacing 20 pt, before 0 line, after 1 line. One space between figure number and title.
 - Table caption, such as `表2-1 XXX`: numbered by chapter, above the table, Songti 10.5 pt, centered, exact line spacing 20 pt, before 1 line, after 0 line. One space between table number and title.
+- Tables should include both number and title. The table number uses `表` plus Arabic numerals; chapter-based forms such as `表2-1` or `表2.1` are acceptable.
+- The table title follows the table number, and both must be placed above the table with exactly one space between number and title text.
+- Tables should preferably use international three-line table style; full grid or heavy vertical borders require manual confirmation.
+- Continued tables should repeat the table number and table header above the table, with the number followed by `（续）` when applicable.
+- Table self-explanation, in-text placement, horizontal/vertical reading clarity, and CY/T170 compliance are manual review items.
 - Formula: centered. Formula number uses parentheses, Songti 10.5 pt, right aligned.
 
 ## Header And Page Number

@@ -207,7 +207,7 @@ RULES: dict[str, Rule] = {
         first_line_indent_chars=0,
         space_before_lines=1,
         space_after_lines=0,
-        expected="表序、表名、表注：宋体五号10.5pt，居中，固定20磅行距，段前1行，段后0行，置于表上方，表序与表名之间空一格。",
+        expected="表序、表名、表注：按章编号，置于表上方，宋体五号10.5pt，居中，固定20磅行距，段前1行，段后0行，表序与表名之间空一个空格；续表头右顶格，续表应重复表编号和表头。",
     ),
     "abstract_title_zh": Rule(
         "abstract_title_zh",
@@ -231,7 +231,7 @@ RULES: dict[str, Rule] = {
         ALIGN_CENTER,
         space_before_lines=0.5,
         space_after_lines=0.5,
-        expected="英文摘要标题写作“ABSTRACT”，Times New Roman四号14pt，加粗，居中，段前0.5行，段后0.5行。",
+        expected="英文摘要标题必须写作 ABSTRACT，所有字母大写，且应为独立标题段落；Times New Roman四号14pt，加粗，居中，段前0.5行，段后0.5行。",
     ),
     "keywords": Rule(
         "keywords",
@@ -1326,7 +1326,6 @@ def ensure_abstract_heading_split(document: Document) -> None:
         if not text:
             continue
         zh_match = re.match(r"^\s*摘要\s*[:：]\s*(.+)$", text)
-        en_match = re.match(r"^\s*Abstract\s*[:：]\s*(.+)$", text, re.I)
         if zh_match:
             prev_text_compact = compact_text(_xml_para_text(paragraph._p.getprevious()))
             if prev_text_compact != "摘要":
@@ -1335,13 +1334,19 @@ def ensure_abstract_heading_split(document: Document) -> None:
             paragraph.text = zh_match.group(1).strip()
             apply_rule(paragraph, RULES["abstract_body_zh"])
             continue
-        if en_match:
-            prev_text_upper = compact_text(_xml_para_text(paragraph._p.getprevious())).upper()
-            if prev_text_upper != "ABSTRACT":
-                heading = paragraph.insert_paragraph_before("Abstract")
-                apply_rule(heading, RULES["abstract_title_en"])
-            paragraph.text = en_match.group(1).strip()
-            apply_rule(paragraph, RULES["abstract_body_en"])
+
+
+def normalize_english_abstract_title(document: Document) -> None:
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    for idx, paragraph in enumerate(document.paragraphs):
+        if idx >= len(regions) or regions[idx] != "abstract_en":
+            continue
+        stripped = paragraph_text(paragraph).strip()
+        if not stripped:
+            continue
+        if re.match(r"^abstract\s*[:：]?\s*$", stripped, re.I):
+            _apply_text_to_runs(paragraph, "ABSTRACT")
 
 
 def _is_plain_blank_paragraph(paragraph) -> bool:
@@ -1740,8 +1745,12 @@ def collect_page_number_issues(section, sec_idx: int, page_kind: str | None) -> 
 def collect_abstract_title_issues(document: Document) -> list[Issue]:
     issues: list[Issue] = []
     texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
     has_zh_title = any(compact_text(text) == "摘要" or text.strip() == "摘 要" for text in texts)
-    has_en_title = any(compact_text(text).upper() == "ABSTRACT" for text in texts)
+    has_en_title = any(
+        idx < len(regions) and regions[idx] == "abstract_en" and compact_text(text) == "ABSTRACT"
+        for idx, text in enumerate(texts)
+    )
     for idx, text in enumerate(texts):
         stripped = text.strip()
         if not stripped:
@@ -1763,25 +1772,63 @@ def collect_abstract_title_issues(document: Document) -> list[Issue]:
             )
             break
     for idx, text in enumerate(texts):
+        if idx >= len(regions) or regions[idx] != "abstract_en":
+            continue
         stripped = text.strip()
         if not stripped:
             continue
-        if not has_en_title and re.match(r"^Abstract\s*[:：]", stripped, re.I):
-            rule = RULES["abstract_title_en"]
+        match = re.match(r"^(Abstract)\s*([:：])?\s*(.*)$", stripped, re.I)
+        if not match:
+            continue
+        tail = match.group(3).strip()
+        rule = RULES["abstract_title_en"]
+        if tail:
             issues.append(
                 Issue(
                     paragraph_index=idx,
-                    rule_key="abstract_title_en_missing",
+                    rule_key="abstract_title_en_text",
                     text_type=rule.label,
                     text_excerpt=stripped[:160],
-                    current="英文摘要标题与摘要正文合并在同一段，且未检测到独立“ABSTRACT”标题。",
-                    expected=rule.expected,
-                    message=f"文本类型：{rule.label}\n当前格式：英文摘要标题与正文合并\n应改为：{rule.expected}",
+                    current=f"当前标题文本为“{stripped}”，标题与正文混在同一段。",
+                    expected="英文摘要标题必须写作“ABSTRACT”，所有字母大写，并单独成段。",
+                    message=(
+                        f"文本类型：{rule.label}\n当前格式：{stripped}\n"
+                        "应改为：ABSTRACT（标题单独成段，正文另起段，需要人工确认或拆分）。"
+                    ),
                     category=rule.category,
                     location=f"paragraph {idx}",
                 )
             )
-            break
+            if not has_en_title:
+                issues.append(
+                    Issue(
+                        paragraph_index=idx,
+                        rule_key="abstract_title_en_missing",
+                        text_type=rule.label,
+                        text_excerpt=stripped[:160],
+                        current="英文摘要标题与摘要正文合并在同一段，且未检测到独立“ABSTRACT”标题。",
+                        expected=rule.expected,
+                        message=f"文本类型：{rule.label}\n当前格式：英文摘要标题与正文合并\n应改为：{rule.expected}",
+                        category=rule.category,
+                        location=f"paragraph {idx}",
+                    )
+                )
+                break
+            continue
+        if stripped != "ABSTRACT":
+            issues.append(
+                Issue(
+                    paragraph_index=idx,
+                    rule_key="abstract_title_en_text",
+                    text_type=rule.label,
+                    text_excerpt=stripped[:160],
+                    current=f"当前标题文本为“{stripped}”。",
+                    expected="英文摘要标题必须写作“ABSTRACT”，所有字母大写，并单独成段。",
+                    message=f"文本类型：{rule.label}\n当前格式：{stripped}\n应改为：ABSTRACT",
+                    category=rule.category,
+                    location=f"paragraph {idx}",
+                )
+            )
     return issues
 
 
@@ -1889,6 +1936,11 @@ def table_has_vertical_borders(table) -> bool:
 def collect_table_issues(document: Document) -> list[Issue]:
     issues: list[Issue] = []
     blocks = list(iter_body_blocks(document))
+    caption_ok_re = re.compile(r"^(?:表|Table)\s*\d+(?:[-.]\d+)?\s+\S.+$", re.I)
+    caption_no_space_re = re.compile(r"^(?:表|Table)\s*\d+(?:[-.]\d+)?\S.+$", re.I)
+    caption_only_re = re.compile(r"^(?:表|Table)\s*\d+(?:[-.]\d+)?\s*$", re.I)
+    caption_any_re = re.compile(r"^(?:表|Table)\s*\d+(?:[-.]\d+)?", re.I)
+    continued_re = re.compile(r"(续表|[(（]续[)）])")
     for pos, (kind, table_idx, table) in enumerate(blocks):
         if kind != "tbl":
             continue
@@ -1899,24 +1951,31 @@ def collect_table_issues(document: Document) -> list[Issue]:
         if pos + 1 < len(blocks) and blocks[pos + 1][0] == "p":
             next_text = paragraph_text(blocks[pos + 1][2])
 
-        caption_above_ok = re.match(r"^(?:\u8868|Table)\s*\d+[-—.]\d+\s+\S+", prev_text, re.I) is not None
+        caption_above_ok = caption_ok_re.match(prev_text) is not None
         if not caption_above_ok:
             issues.append(_issue_global("table_caption_missing", "table caption", f"表{table_idx + 1} 上方未检测到规范表题。", "表应有编号和表题，且置于表上方。", "table", f"table {table_idx + 1}", prev_text or next_text))
-        if re.match(r"^(?:\u8868|Table)\s*\d+[-—.]\d+\s+\S+", next_text, re.I):
+        if caption_any_re.match(next_text):
             issues.append(_issue_global("table_caption_position", "table caption", f"表{table_idx + 1} 下方检测到表题，位置错误。", "表题应置于表上方。", "table", f"table {table_idx + 1}", next_text))
-        if prev_text and re.match(r"^(?:\u8868|Table)\s*\d+[-—.]\d+\S+", prev_text, re.I):
+        if prev_text and caption_no_space_re.match(prev_text) and not caption_ok_re.match(prev_text):
             issues.append(_issue_global("table_caption_number_format", "table caption", f"表{table_idx + 1} 表序与表名之间缺少空格。", "表序与表名之间应空一个空格。", "table", f"table {table_idx + 1}", prev_text))
+        if prev_text and caption_only_re.match(prev_text):
+            issues.append(_issue_global("table_caption_missing", "table caption", f"表{table_idx + 1} 仅检测到表序，缺少表名。", "表题应置于编号之后，表序与表名之间空一个空格。", "table", f"table {table_idx + 1}", prev_text))
 
         style_name = table.style.name if table.style is not None else ""
         if "grid" in style_name.lower() or table_has_vertical_borders(table):
             issues.append(_issue_global("table_three_line_style", "three-line table", f"表{table_idx + 1} 疑似全网格线/竖线。", "表格宜采用三线表；OOXML 边框检查为启发式，需要人工确认。", "table", f"table {table_idx + 1}"))
 
-        if "\u7eed\u8868" in prev_text or "\uff08\u7eed\uff09" in prev_text:
+        if continued_re.search(prev_text) or continued_re.search(next_text):
+            if continued_re.search(next_text):
+                issues.append(_issue_global("table_caption_position", "continued table caption", f"续表 {table_idx + 1} 标记出现在表格下方。", "续表标记应置于表上方。", "table", f"table {table_idx + 1}", next_text))
+            if not caption_any_re.match(prev_text):
+                issues.append(_issue_global("table_continued_header", "continued table", f"续表 {table_idx + 1} 未检测到重复表编号。", "续表编号应重复原表编号，并在编号后跟“（续）”。", "table", f"table {table_idx + 1}", prev_text or next_text))
             first_row = " ".join(cell.text.strip() for cell in table.rows[0].cells) if table.rows else ""
             if not first_row:
                 issues.append(_issue_global("table_continued_header", "continued table", f"续表 {table_idx + 1} 未检测到重复表头。", "续表应重复编号和表头；跨页续表头重复情况需人工确认。", "table", f"table {table_idx + 1}"))
+            issues.append(_issue_global("table_continued_header", "continued table", f"续表 {table_idx + 1} 跨页续表与表头重复情况无法可靠自动判断。", "续表应重复表编号和表头；若 OOXML 无法可靠判断，需人工确认。", "table", f"table {table_idx + 1}"))
 
-        issues.append(_issue_global("table_manual_review", "table manual review", f"表{table_idx + 1} 随文性、自明性与数据可读性需人工复核。", "请人工确认规范2.6.6.2中的语义要求。", "table", f"table {table_idx + 1}"))
+        issues.append(_issue_global("table_manual_review", "table manual review", f"表{table_idx + 1} 的自明性、随文出现、横读竖读与 CY/T170 符合性需人工复核。", "表的自明性、随文出现、横读竖读和 CY/T170 需人工复核。", "table", f"table {table_idx + 1}"))
     return issues
 
 
@@ -2099,6 +2158,7 @@ def collect_issues(document: Document) -> list[Issue]:
 
 def apply_supported_rules(document: Document, allow_layout_fixes: bool) -> None:
     ensure_abstract_heading_split(document)
+    normalize_english_abstract_title(document)
     apply_page_setup(document, allow_layout_fixes=allow_layout_fixes)
     texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
     structure = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))

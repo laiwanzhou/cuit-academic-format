@@ -142,3 +142,85 @@ def test_table_caption_and_three_line_checks():
     assert "table_caption_missing" in keys
     assert "table_caption_position" in keys
     assert "table_three_line_style" in keys
+
+
+def test_english_abstract_title_normalization_and_issue():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("Abstract")
+    doc.add_paragraph("This is abstract body.")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en"] * len(texts)}
+    mod.normalize_english_abstract_title(doc)
+    assert doc.paragraphs[0].text == "ABSTRACT"
+    issues = mod.collect_abstract_title_issues(doc)
+    keys = {x.rule_key for x in issues}
+    assert "abstract_title_en_text" not in keys
+
+
+def test_english_abstract_title_colon_normalization():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("ABSTRACT:")
+    doc.add_paragraph("Body line.")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en"] * len(texts)}
+    mod.normalize_english_abstract_title(doc)
+    assert doc.paragraphs[0].text == "ABSTRACT"
+
+
+def test_english_abstract_title_mixed_with_body_report_only():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("Abstract: With the outbreak of COVID-19...")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en"]}
+    before = doc.paragraphs[0].text
+    mod.normalize_english_abstract_title(doc)
+    assert doc.paragraphs[0].text == before
+    issues = mod.collect_abstract_title_issues(doc)
+    assert any(issue.rule_key == "abstract_title_en_text" for issue in issues)
+
+
+def test_body_abstract_word_not_reported_as_title():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("This section discusses Abstract Factory pattern.")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["body"]}
+    issues = mod.collect_abstract_title_issues(doc)
+    assert issues == []
+
+
+def test_table_caption_number_formats_and_spacing():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("表2-1 示例表题")
+    t1 = doc.add_table(rows=2, cols=2)
+    t1.style = "Normal Table"
+    doc.add_paragraph("表1 示例表题")
+    t2 = doc.add_table(rows=2, cols=2)
+    t2.style = "Normal Table"
+    doc.add_paragraph("表2.1 示例表题")
+    t3 = doc.add_table(rows=2, cols=2)
+    t3.style = "Normal Table"
+    issues = mod.collect_table_issues(doc)
+    keys = [x.rule_key for x in issues]
+    assert "table_caption_missing" not in keys
+    assert "table_caption_number_format" not in keys
+
+
+def test_table_caption_missing_space_detected():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("表2-1示例表题")
+    table = doc.add_table(rows=2, cols=2)
+    table.style = "Normal Table"
+    issues = mod.collect_table_issues(doc)
+    assert any(issue.rule_key == "table_caption_number_format" for issue in issues)
+
+
+def test_continued_table_prompts():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("续表（续）")
+    table = doc.add_table(rows=1, cols=2)
+    table.style = "Normal Table"
+    issues = mod.collect_table_issues(doc)
+    assert any(issue.rule_key == "table_continued_header" for issue in issues)

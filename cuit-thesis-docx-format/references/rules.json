@@ -80,7 +80,7 @@
       "line_spacing_pt": 20,
       "space_before_lines": 0.5,
       "space_after_lines": 0.5,
-      "expected": "英文摘要标题写作“ABSTRACT”，Times New Roman四号14pt，加粗，居中，段前0.5行，段后0.5行。"
+      "expected": "英文摘要标题必须写作 ABSTRACT，所有字母大写，且应为独立标题段落；Times New Roman四号14pt，加粗，居中，段前0.5行，段后0.5行。"
     },
     "abstract_body_zh": {
       "label": "Chinese abstract body",
@@ -254,7 +254,7 @@
       "first_line_indent_chars": 0,
       "space_before_lines": 1,
       "space_after_lines": 0,
-      "expected": "表序、表名、表注：宋体五号10.5pt，居中，固定20磅行距，段前1行，段后0行，置于表上方，表序与表名之间空一格。"
+      "expected": "表序、表名、表注：按章编号，置于表上方，宋体五号10.5pt，居中，固定20磅行距，段前1行，段后0行，表序与表名之间空一个空格；续表头右顶格，续表应重复表编号和表头。"
     },
     "formula": {
       "label": "formula number",
