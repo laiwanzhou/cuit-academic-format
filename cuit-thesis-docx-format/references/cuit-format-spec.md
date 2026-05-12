@@ -40,8 +40,8 @@ Source: `paper-format/成都信息工程大学学士学位论文规范.docx`
 
 ## Figures, Tables, And Formulas
 
-- Figure caption, such as `图2-1 XXX`: numbered by chapter, below the figure, Songti 10.5 pt, centered, exact line spacing 20 pt, before/after 0 line. One space between figure number and title.
-- Table caption, such as `表2-1 XXX`: numbered by chapter, above the table, Songti 10.5 pt, centered, exact line spacing 20 pt, before/after 0 line. One space between table number and title.
+- Figure caption, such as `图2-1 XXX`: numbered by chapter, below the figure, Songti 10.5 pt, centered, exact line spacing 20 pt, before 0 line, after 1 line. One space between figure number and title.
+- Table caption, such as `表2-1 XXX`: numbered by chapter, above the table, Songti 10.5 pt, centered, exact line spacing 20 pt, before 1 line, after 0 line. One space between table number and title.
 - Formula: centered. Formula number uses parentheses, Songti 10.5 pt, right aligned.
 
 ## Header And Page Number
