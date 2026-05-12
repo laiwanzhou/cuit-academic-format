@@ -234,16 +234,48 @@ def test_english_abstract_title_colon_normalization():
     assert doc.paragraphs[0].text == "ABSTRACT"
 
 
-def test_english_abstract_title_mixed_with_body_report_only():
+def test_english_abstract_title_mixed_with_body_auto_split():
     mod = load_module()
     doc = mod.Document()
     doc.add_paragraph("Abstract: With the outbreak of COVID-19...")
     mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en"]}
-    before = doc.paragraphs[0].text
     mod.normalize_english_abstract_title(doc)
-    assert doc.paragraphs[0].text == before
+    assert len(doc.paragraphs) == 2
+    assert doc.paragraphs[0].text == "ABSTRACT"
+    assert doc.paragraphs[1].text == "With the outbreak of COVID-19..."
     issues = mod.collect_abstract_title_issues(doc)
-    assert any(issue.rule_key == "abstract_title_en_text" for issue in issues)
+    assert all(issue.rule_key != "abstract_title_en_text" for issue in issues)
+
+
+def test_english_abstract_title_mixed_with_body_auto_split_cn_colon():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("ABSTRACT：With the outbreak of COVID-19...")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en"]}
+    mod.normalize_english_abstract_title(doc)
+    assert len(doc.paragraphs) == 2
+    assert doc.paragraphs[0].text == "ABSTRACT"
+    assert doc.paragraphs[1].text == "With the outbreak of COVID-19..."
+
+
+def test_english_abstract_title_with_empty_tail_only_normalized():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("Abstract:")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en"]}
+    mod.normalize_english_abstract_title(doc)
+    assert len(doc.paragraphs) == 1
+    assert doc.paragraphs[0].text == "ABSTRACT"
+
+
+def test_english_abstract_title_split_applies_rules():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("abstract: With the outbreak of COVID-19...")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en"]}
+    mod.normalize_english_abstract_title(doc)
+    assert mod.paragraph_matches(doc.paragraphs[0], mod.RULES["abstract_title_en"])
+    assert mod.paragraph_matches(doc.paragraphs[1], mod.RULES["abstract_body_en"])
 
 
 def test_body_abstract_word_not_reported_as_title():

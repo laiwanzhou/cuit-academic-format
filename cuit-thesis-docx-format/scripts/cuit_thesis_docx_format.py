@@ -1410,7 +1410,19 @@ def normalize_english_abstract_title(document: Document) -> None:
         stripped = paragraph_text(paragraph).strip()
         if not stripped:
             continue
-        if re.match(r"^abstract\s*[:：]?\s*$", stripped, re.I):
+        split_match = re.match(r"^abstract\s*[:：]\s*(.*)$", stripped, re.I)
+        if split_match:
+            tail = split_match.group(1).strip()
+            if tail:
+                heading = paragraph.insert_paragraph_before("ABSTRACT")
+                apply_rule(heading, RULES["abstract_title_en"])
+                _apply_text_to_runs(paragraph, tail)
+                apply_rule(paragraph, RULES["abstract_body_en"])
+            else:
+                _apply_text_to_runs(paragraph, "ABSTRACT")
+                apply_rule(paragraph, RULES["abstract_title_en"])
+            continue
+        if re.match(r"^abstract\s*$", stripped, re.I):
             _apply_text_to_runs(paragraph, "ABSTRACT")
 
 
@@ -1851,15 +1863,16 @@ def collect_abstract_title_issues(document: Document) -> list[Issue]:
             issues.append(
                 Issue(
                     paragraph_index=idx,
-                    rule_key="abstract_title_en_text",
+                    rule_key="abstract_title_en_split",
                     text_type=rule.label,
                     text_excerpt=stripped[:160],
                     current=f"当前标题文本为“{stripped}”，标题与正文混在同一段。",
                     expected="英文摘要标题必须写作“ABSTRACT”，所有字母大写，并单独成段。",
                     message=(
                         f"文本类型：{rule.label}\n当前格式：{stripped}\n"
-                        "应改为：ABSTRACT（标题单独成段，正文另起段，需要人工确认或拆分）。"
+                        "应改为：ABSTRACT（标题单独成段，正文另起段）。"
                     ),
+                    after="已拆分为：ABSTRACT + 摘要正文。",
                     category=rule.category,
                     location=f"paragraph {idx}",
                 )
