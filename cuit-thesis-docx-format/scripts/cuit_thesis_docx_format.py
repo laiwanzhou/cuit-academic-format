@@ -1642,6 +1642,206 @@ def _blank_paragraph_has_risky_nodes(paragraph) -> bool:
     return False
 
 
+def _is_effectively_blank_paragraph(paragraph) -> bool:
+    if not _is_target_empty_paragraph_text(paragraph.text):
+        return False
+    for node in paragraph._p.iter():
+        if node.tag in {qn("w:drawing"), qn("w:object"), qn("w:pict")}:
+            return False
+        if node.tag == qn("w:t") and _is_target_empty_paragraph_text(node.text or "") is False:
+            return False
+    return True
+
+
+def _blank_paragraph_has_only_safe_boundary_nodes(paragraph) -> bool:
+    allowed = {
+        qn("w:p"),
+        qn("w:pPr"),
+        qn("w:r"),
+        qn("w:rPr"),
+        qn("w:br"),
+        qn("w:bookmarkStart"),
+        qn("w:bookmarkEnd"),
+        qn("w:commentRangeStart"),
+        qn("w:commentRangeEnd"),
+        qn("w:sectPr"),
+        qn("w:pStyle"),
+        qn("w:spacing"),
+        qn("w:ind"),
+        qn("w:jc"),
+        qn("w:rFonts"),
+        qn("w:sz"),
+        qn("w:szCs"),
+        qn("w:highlight"),
+        qn("w:proofErr"),
+        qn("w:t"),
+        qn("w:tab"),
+    }
+    for node in paragraph._p.iter():
+        parent = node.getparent() if hasattr(node, "getparent") else None
+        while parent is not None:
+            if parent.tag == qn("w:sectPr"):
+                parent = None
+                break
+            parent = parent.getparent() if hasattr(parent, "getparent") else None
+        if parent is None and node.tag != qn("w:sectPr"):
+            # Nodes under sectPr are considered safe boundary metadata.
+            sect_ancestor = False
+            cur = node.getparent() if hasattr(node, "getparent") else None
+            while cur is not None:
+                if cur.tag == qn("w:sectPr"):
+                    sect_ancestor = True
+                    break
+                cur = cur.getparent() if hasattr(cur, "getparent") else None
+            if sect_ancestor:
+                continue
+        if node.tag not in allowed:
+            return False
+    return True
+
+
+def _migrate_sectpr_to_previous_paragraph(document: Document, blank_idx: int, prev_idx: int) -> bool:
+    if blank_idx <= 0 or prev_idx < 0 or blank_idx >= len(document.paragraphs) or prev_idx >= len(document.paragraphs):
+        return False
+    blank = document.paragraphs[blank_idx]
+    ppr = blank._p.pPr
+    if ppr is None:
+        return False
+    sect_pr = ppr.find(qn("w:sectPr"))
+    if sect_pr is None:
+        return False
+    prev = document.paragraphs[prev_idx]
+    prev_ppr = prev._p.get_or_add_pPr()
+    old_prev_sect = prev_ppr.find(qn("w:sectPr"))
+    if old_prev_sect is not None:
+        prev_ppr.remove(old_prev_sect)
+    prev_ppr.append(deepcopy(sect_pr))
+    return True
+
+
+def _blank_paragraph_is_toc_field_placeholder(paragraph) -> bool:
+    if not _is_effectively_blank_paragraph(paragraph):
+        return False
+    has_toc_instr = False
+    has_field_char = False
+    for node in paragraph._p.iter():
+        if node.tag in {qn("w:drawing"), qn("w:object"), qn("w:pict")}:
+            return False
+        if node.tag == qn("w:instrText"):
+            text = (node.text or "").upper()
+            if "TOC" in text:
+                has_toc_instr = True
+            else:
+                return False
+        elif node.tag == qn("w:fldChar"):
+            has_field_char = True
+    return has_toc_instr or has_field_char
+
+
+def cleanup_module_boundary_blank_paragraphs(
+    document: Document,
+    regions: list[str] | None = None,
+    apply_changes: bool = True,
+) -> list[Issue]:
+    issues: list[Issue] = []
+    if regions is None:
+        texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+        regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    n = len(document.paragraphs)
+    if n == 0:
+        return issues
+
+    def _next_non_empty(start_idx: int) -> int | None:
+        for i in range(start_idx, len(document.paragraphs)):
+            if not _is_target_empty_paragraph_text(paragraph_text(document.paragraphs[i])):
+                return i
+        return None
+
+    boundary_specs: list[tuple[re.Pattern[str], callable | None]] = [
+        (
+            re.compile(r"^\s*Key\s*words\s*[:：]", re.I),
+            None,
+        ),
+        (
+            re.compile(r"^\s*关键词\s*[:：]"),
+            lambda idx, region, text: region == "abstract_en" or bool(re.match(r"^\s*ABSTRACT\s*$", text, re.I)),
+        ),
+    ]
+
+    i = 0
+    while i < len(document.paragraphs):
+        anchor_text = paragraph_text(document.paragraphs[i])
+        anchor_region = regions[i] if i < len(regions) else ""
+        matched = None
+        for pat, target_match in boundary_specs:
+            if pat.search(anchor_text):
+                matched = (pat, target_match)
+                break
+        if matched is None or anchor_region == "cover":
+            i += 1
+            continue
+        _pat, target_match = matched
+        next_non_empty = _next_non_empty(i + 1)
+        if next_non_empty is None:
+            i += 1
+            continue
+        next_text = paragraph_text(document.paragraphs[next_non_empty]).strip()
+        next_region = regions[next_non_empty] if next_non_empty < len(regions) else ""
+        if target_match is not None and not target_match(next_non_empty, next_region, next_text):
+            i += 1
+            continue
+        failed = False
+        for blank_idx in range(next_non_empty - 1, i, -1):
+            if blank_idx >= len(document.paragraphs):
+                continue
+            blank = document.paragraphs[blank_idx]
+            blank_region = regions[blank_idx] if blank_idx < len(regions) else ""
+            if blank_region == "cover":
+                continue
+            if not _is_effectively_blank_paragraph(blank):
+                continue
+            is_toc_placeholder = _blank_paragraph_is_toc_field_placeholder(blank)
+            if not _blank_paragraph_has_only_safe_boundary_nodes(blank) and not is_toc_placeholder:
+                failed = True
+                continue
+            has_sectpr = blank._p.pPr is not None and blank._p.pPr.find(qn("w:sectPr")) is not None
+            has_page_break = any(
+                node.tag == qn("w:br") and node.get(qn("w:type")) == "page"
+                for node in blank._p.iter()
+            )
+            if has_page_break and apply_changes and next_non_empty < len(document.paragraphs):
+                document.paragraphs[next_non_empty].paragraph_format.page_break_before = True
+            if has_sectpr and apply_changes:
+                if not _migrate_sectpr_to_previous_paragraph(document, blank_idx, i):
+                    failed = True
+                    continue
+            if apply_changes:
+                blank._element.getparent().remove(blank._element)
+        if failed:
+            issues.append(
+                Issue(
+                    paragraph_index=i,
+                    rule_key="abstract_toc_boundary_blank_manual_review",
+                    text_type="abstract/toc boundary blank paragraph",
+                    text_excerpt=anchor_text[:160],
+                    current="英文摘要与目录之间存在承载分节/分页属性的空白段，无法安全自动删除。",
+                    expected="英文摘要与目录边界不应出现可见空白段；如含分节/分页属性需人工确认。",
+                    message="英文摘要与目录之间存在承载分节/分页属性的空白段，无法安全自动删除，需要人工确认。",
+                    category="body-spacing",
+                    location="abstract_en to toc boundary",
+                )
+            )
+        i = next_non_empty
+    return issues
+
+
+def cleanup_visible_blank_paragraphs_after_layout(document: Document) -> list[Issue]:
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    return cleanup_module_boundary_blank_paragraphs(document, regions=regions, apply_changes=True)
+
+
 def collect_empty_paragraph_issues(
     document: Document,
     regions: list[str] | None = None,
@@ -1711,6 +1911,9 @@ def normalize_document_structure(document: Document) -> None:
     regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
     _empty_issues, to_remove = collect_empty_paragraph_issues(document, regions=regions, allowed_regions=allowed_regions)
     remove_target_empty_paragraphs(document, to_remove)
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    cleanup_module_boundary_blank_paragraphs(document, regions=regions, apply_changes=True)
 
 
 def apply_page_setup(document: Document, allow_layout_fixes: bool) -> None:
@@ -2597,6 +2800,7 @@ def collect_issues(document: Document) -> list[Issue]:
     issues.extend(collect_image_size_issues(document))
     empty_issues, _to_remove = collect_empty_paragraph_issues(document)
     issues.extend(empty_issues)
+    issues.extend(cleanup_module_boundary_blank_paragraphs(document, apply_changes=False))
     return issues
 
 
@@ -2617,6 +2821,9 @@ def apply_supported_rules(document: Document, allow_layout_fixes: bool) -> None:
                 normalized_text = normalize_body_cjk_spacing(paragraph.text)
                 if normalized_text != paragraph.text:
                     _apply_text_to_runs(paragraph, normalized_text)
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    cleanup_visible_blank_paragraphs_after_layout(document)
     enforce_image_height_limit(document)
 
 
@@ -3497,6 +3704,10 @@ def run(
         fixed_doc.save(str(fixed_path))
     fixed_renderer = try_com_save(fixed_path, renderer)
     comments_renderer = try_com_save(comments_path, renderer)
+    # Some Word/WPS save paths can reintroduce boundary placeholders (for TOC fields/section metadata).
+    post_layout_doc = Document(str(fixed_path))
+    cleanup_visible_blank_paragraphs_after_layout(post_layout_doc)
+    post_layout_doc.save(str(fixed_path))
     attach_after_formats(fixed_path, issues)
     screenshot_status, render_qa = attach_screenshots(
         input_path=input_path,

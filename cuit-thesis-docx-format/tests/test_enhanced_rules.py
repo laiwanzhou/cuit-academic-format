@@ -544,3 +544,120 @@ def test_find_header_start_section_prefers_abstract_toc_body_regions():
     start, reason = mod.find_header_start_section(doc)
     assert start is not None
     assert reason in {"abstract-or-later", "fallback-second-section"}
+
+
+def test_remove_blank_between_english_keywords_and_toc():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("ABSTRACT")
+    doc.add_paragraph("English abstract body.")
+    doc.add_paragraph("Key words: Data visualization; Machine Learning")
+    doc.add_paragraph("   ")
+    doc.add_paragraph("目 录")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {
+        "regions": ["abstract_en", "abstract_en", "abstract_en", "abstract_en", "toc"]
+    }
+    mod.cleanup_module_boundary_blank_paragraphs(doc, apply_changes=True)
+    texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
+    key_idx = texts.index("Key words: Data visualization; Machine Learning")
+    toc_idx = texts.index("目 录")
+    assert toc_idx == key_idx + 1
+
+
+def test_migrate_sectpr_blank_between_keywords_and_toc():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("Key words: Data visualization")
+    blank = doc.add_paragraph("")
+    ppr = blank._p.get_or_add_pPr()
+    sect_pr = mod.OxmlElement("w:sectPr")
+    ppr.append(sect_pr)
+    doc.add_paragraph("目 录")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en", "abstract_en", "toc"]}
+    mod.cleanup_module_boundary_blank_paragraphs(doc, apply_changes=True)
+    texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
+    assert "" not in texts
+    key_para = doc.paragraphs[0]
+    assert key_para._p.pPr is not None and key_para._p.pPr.find(mod.qn("w:sectPr")) is not None
+
+
+def test_remove_blank_between_chinese_keywords_and_english_abstract():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("摘 要")
+    doc.add_paragraph("中文摘要正文")
+    doc.add_paragraph("关键词：数据可视化")
+    doc.add_paragraph("   ")
+    doc.add_paragraph("ABSTRACT")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {
+        "regions": ["abstract_zh", "abstract_zh", "abstract_zh", "abstract_zh", "abstract_en"]
+    }
+    mod.cleanup_module_boundary_blank_paragraphs(doc, apply_changes=True)
+    texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
+    kw_idx = texts.index("关键词：数据可视化")
+    en_idx = texts.index("ABSTRACT")
+    assert en_idx == kw_idx + 1
+
+
+def test_cover_blank_paragraphs_are_not_removed():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("封面标题")
+    doc.add_paragraph("")
+    doc.add_paragraph("")
+    doc.add_paragraph("姓名：张三")
+    doc.add_paragraph("摘 要")
+    before = [mod.paragraph_text(p) for p in doc.paragraphs]
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {
+        "regions": ["cover", "cover", "cover", "cover", "abstract_zh"]
+    }
+    mod.cleanup_module_boundary_blank_paragraphs(doc, apply_changes=True)
+    after = [mod.paragraph_text(p) for p in doc.paragraphs]
+    assert before == after
+
+
+def test_layout_cleanup_runs_after_page_headers():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("ABSTRACT")
+    doc.add_paragraph("English abstract body.")
+    doc.add_paragraph("Key words: Data visualization")
+    blank = doc.add_paragraph("")
+    ppr = blank._p.get_or_add_pPr()
+    ppr.append(mod.OxmlElement("w:sectPr"))
+    doc.add_paragraph("目 录")
+    doc.add_paragraph("第一章 绪论")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en"] * 4 + ["toc", "body"]}
+    mod.find_header_start_section = lambda _doc: (0, "abstract-or-later")
+    mod.apply_supported_rules(doc, allow_layout_fixes=True)
+    texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
+    key_idx = texts.index("Key words: Data visualization")
+    toc_idx = texts.index("目 录")
+    assert toc_idx == key_idx + 1
+    assert "成都信息工程大学学士学位论文" in _header_text(doc.sections[0], mod)
+
+
+def test_remove_toc_field_placeholder_blank_after_english_keywords():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("ABSTRACT")
+    doc.add_paragraph("English abstract body.")
+    doc.add_paragraph("Key words: Data visualization")
+    p1 = doc.add_paragraph("")
+    r1 = p1.add_run()
+    r1._r.append(mod.OxmlElement("w:fldChar"))
+    r2 = p1.add_run()
+    instr = mod.OxmlElement("w:instrText")
+    instr.text = ' TOC \\o "1-3" \\h \\z \\u '
+    r2._r.append(instr)
+    p2 = doc.add_paragraph("")
+    ppr = p2._p.get_or_add_pPr()
+    ppr.append(mod.OxmlElement("w:sectPr"))
+    p2.add_run()._r.append(mod.OxmlElement("w:fldChar"))
+    doc.add_paragraph("1 引 言")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en"] * 5 + ["body"]}
+    mod.cleanup_module_boundary_blank_paragraphs(doc, apply_changes=True)
+    texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
+    key_idx = texts.index("Key words: Data visualization")
+    body_idx = texts.index("1 引 言")
+    assert body_idx == key_idx + 1
