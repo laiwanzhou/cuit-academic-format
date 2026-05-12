@@ -3,6 +3,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from docx.enum.section import WD_SECTION_START
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -453,3 +455,92 @@ def test_continued_table_prompts():
     table.style = "Normal Table"
     issues = mod.collect_table_issues(doc)
     assert any(issue.rule_key == "table_continued_header" for issue in issues)
+
+
+def _build_header_sections_doc(mod):
+    doc = mod.Document()
+    doc.add_paragraph("封面标题")
+    doc.add_paragraph("")
+    doc.add_paragraph("")
+    doc.add_section(WD_SECTION_START.NEW_PAGE)
+    doc.add_paragraph("摘 要")
+    doc.add_paragraph("这是中文摘要内容。")
+    doc.add_section(WD_SECTION_START.NEW_PAGE)
+    doc.add_paragraph("ABSTRACT")
+    doc.add_paragraph("This is english abstract.")
+    doc.add_section(WD_SECTION_START.NEW_PAGE)
+    doc.add_paragraph("目 录")
+    doc.add_section(WD_SECTION_START.NEW_PAGE)
+    doc.add_paragraph("第一章 绪论")
+    doc.add_paragraph("这是正文段落。")
+    return doc
+
+
+def _header_text(section, mod):
+    return " ".join(mod.paragraph_text(p) for p in section.header.paragraphs).strip()
+
+
+def _section_idx_contains_text(mod, doc, needle):
+    for idx, (start, end) in enumerate(mod.section_paragraph_ranges(doc)):
+        if start > end:
+            continue
+        text = mod.section_text(doc, start, end)
+        if needle in text:
+            return idx
+    raise AssertionError(f"section containing {needle!r} not found")
+
+
+def test_page_header_cover_off_and_abstract_body_on():
+    mod = load_module()
+    doc = _build_header_sections_doc(mod)
+    mod.find_header_start_section = lambda _doc: (1, "abstract-or-later")
+    mod.apply_cuit_page_headers(doc, allow_layout_fixes=True)
+    abstract_idx = _section_idx_contains_text(mod, doc, "摘 要")
+    abstract_en_idx = _section_idx_contains_text(mod, doc, "ABSTRACT")
+    body_idx = _section_idx_contains_text(mod, doc, "第一章 绪论")
+    assert "成都信息工程大学学士学位论文" not in _header_text(doc.sections[0], mod)
+    assert "成都信息工程大学学士学位论文" in _header_text(doc.sections[abstract_idx], mod)
+    assert "成都信息工程大学学士学位论文" in _header_text(doc.sections[abstract_en_idx], mod)
+    assert "成都信息工程大学学士学位论文" in _header_text(doc.sections[body_idx], mod)
+
+
+def test_page_header_format_and_no_duplicate():
+    mod = load_module()
+    doc = _build_header_sections_doc(mod)
+    regions = ["cover", "cover", "cover", "abstract_zh", "abstract_zh", "abstract_en", "abstract_en", "toc", "body", "body"]
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": regions}
+    mod.apply_cuit_page_headers(doc, allow_layout_fixes=True)
+    mod.apply_cuit_page_headers(doc, allow_layout_fixes=True)
+    abstract_idx = _section_idx_contains_text(mod, doc, "摘 要")
+    header = doc.sections[abstract_idx].header
+    exact = [p for p in header.paragraphs if mod.paragraph_text(p).strip() == "成都信息工程大学学士学位论文"]
+    assert len(exact) == 1
+    para = exact[0]
+    assert para.alignment == mod.WD_ALIGN_PARAGRAPH.CENTER
+    run = para.runs[0]
+    assert run.font.size is not None and abs(run.font.size.pt - 9.0) < 0.1
+    assert run._element.rPr is not None and run._element.rPr.rFonts is not None
+    assert run._element.rPr.rFonts.get(mod.qn("w:eastAsia")) == "宋体"
+    assert run._element.rPr.rFonts.get(mod.qn("w:ascii")) == "Times New Roman"
+    assert run._element.rPr.rFonts.get(mod.qn("w:hAnsi")) == "Times New Roman"
+
+
+def test_page_header_does_not_break_cover_content():
+    mod = load_module()
+    doc = _build_header_sections_doc(mod)
+    before_cover = [mod.paragraph_text(p) for p in doc.paragraphs[:3]]
+    regions = ["cover", "cover", "cover", "abstract_zh", "abstract_zh", "abstract_en", "abstract_en", "toc", "body", "body"]
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": regions}
+    mod.apply_cuit_page_headers(doc, allow_layout_fixes=True)
+    after_cover = [mod.paragraph_text(p) for p in doc.paragraphs[:3]]
+    assert before_cover == after_cover
+
+
+def test_find_header_start_section_prefers_abstract_toc_body_regions():
+    mod = load_module()
+    doc = _build_header_sections_doc(mod)
+    regions = ["cover", "cover", "cover", "abstract_zh", "abstract_zh", "abstract_en", "abstract_en", "toc", "body", "body"]
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": regions}
+    start, reason = mod.find_header_start_section(doc)
+    assert start is not None
+    assert reason in {"abstract-or-later", "fallback-second-section"}

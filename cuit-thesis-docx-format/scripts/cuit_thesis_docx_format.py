@@ -1182,15 +1182,18 @@ def ensure_body_starts_new_page_number_section(document: Document) -> bool:
 
 
 def find_header_start_section(document: Document) -> tuple[int | None, str]:
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
     ranges = section_paragraph_ranges(document)
-    declaration_pattern = re.compile(r"(声明|原创性声明|独创性声明|授权声明|版权声明|诚信声明)")
+    target_regions = {"abstract_zh", "abstract_en", "toc", "body"}
     for idx, (start, end) in enumerate(ranges):
-        if declaration_pattern.search(section_text(document, start, end)):
-            return idx, "declaration"
-    fallback_pattern = re.compile(r"(摘\s*要|ABSTRACT|目\s*录|第一章|第\s*1\s*章)")
-    for idx, (start, end) in enumerate(ranges):
-        if fallback_pattern.search(section_text(document, start, end)):
-            return idx, "fallback-front-matter"
+        if start > end:
+            continue
+        section_regions = set(regions[start : end + 1])
+        if section_regions & target_regions:
+            return idx, "abstract-or-later"
+    if len(document.sections) >= 2:
+        return 1, "fallback-second-section"
     return None, "not-found"
 
 
@@ -1202,18 +1205,46 @@ def clear_header(header) -> None:
 def apply_header(section, enabled: bool) -> None:
     section.different_first_page_header_footer = False
     section.header.is_linked_to_previous = False
-    clear_header(section.header)
-    clear_header(section.first_page_header)
-    clear_header(section.even_page_header)
+    section.first_page_header.is_linked_to_previous = False
+    section.even_page_header.is_linked_to_previous = False
     if not enabled:
+        clear_header(section.header)
+        clear_header(section.first_page_header)
+        clear_header(section.even_page_header)
         return
-    para = section.header.paragraphs[0] if section.header.paragraphs else section.header.add_paragraph()
-    para.text = "成都信息工程大学学士学位论文"
+    header_text = "成都信息工程大学学士学位论文"
+    para = None
+    for candidate in section.header.paragraphs:
+        if paragraph_text(candidate).strip() == header_text:
+            para = candidate
+            break
+    if para is None:
+        para = section.header.paragraphs[0] if section.header.paragraphs else section.header.add_paragraph()
+    para.text = header_text
     para.alignment = WD_ALIGN_PARAGRAPH.CENTER
     for run in para.runs:
         run.font.name = "Times New Roman"
+        if run._element.rPr is None:
+            run._element.get_or_add_rPr()
+        run._element.rPr.rFonts.set(qn("w:ascii"), "Times New Roman")
+        run._element.rPr.rFonts.set(qn("w:hAnsi"), "Times New Roman")
         run._element.rPr.rFonts.set(qn("w:eastAsia"), "宋体")
         run.font.size = Pt(9)
+
+
+def apply_cuit_page_headers(document: Document, allow_layout_fixes: bool) -> str:
+    header_start, header_reason = find_header_start_section(document)
+    if header_start is None:
+        return header_reason
+    if header_reason == "fallback-second-section" and not allow_layout_fixes:
+        return "manual-review-needed"
+    for section in document.sections:
+        section.header.is_linked_to_previous = False
+        section.first_page_header.is_linked_to_previous = False
+        section.even_page_header.is_linked_to_previous = False
+    for idx, section in enumerate(document.sections):
+        apply_header(section, enabled=idx >= header_start)
+    return header_reason
 
 
 def _set_section_page_number_format(section, fmt: str, start: int | None = None, clear_start: bool = False) -> None:
@@ -1696,9 +1727,7 @@ def apply_page_setup(document: Document, allow_layout_fixes: bool) -> None:
         # Ensure front-matter and body do not share one physical section,
         # otherwise page-number formats can bleed across module boundaries.
         ensure_body_starts_new_page_number_section(document)
-        header_start, _header_reason = find_header_start_section(document)
-        for idx, section in enumerate(document.sections):
-            apply_header(section, enabled=header_start is not None and idx >= header_start)
+        apply_cuit_page_headers(document, allow_layout_fixes=allow_layout_fixes)
         apply_page_number_formats(document)
 
 
@@ -1755,17 +1784,17 @@ def collect_section_issues(document: Document) -> list[Issue]:
         )
     section_page_kinds = _section_page_kinds(document, regions)
     header_start, header_reason = find_header_start_section(document)
-    if header_reason == "not-found":
+    if header_reason in {"not-found", "fallback-second-section"}:
         rule = RULES["page_header"]
         issues.append(
             Issue(
                 paragraph_index=-1,
-                rule_key="page_header_start",
+                rule_key="page_header_missing",
                 text_type=rule.label,
                 text_excerpt="document header start",
-                current="未识别到声明页、摘要、目录或正文起点，无法可靠判断页眉起始页。",
-                expected="页眉应从声明页开始到最后页，注明“成都信息工程大学学士学位论文”。",
-                message="文本类型：page header\n当前情况：未识别到页眉起始页\n应改为：页眉从声明页开始到最后页。",
+                current="未能可靠定位从摘要/目录/正文开始的页眉边界，需要人工复核。",
+                expected=rule.expected,
+                message=f"文本类型：{rule.label}\n当前情况：未能可靠定位从摘要/目录/正文开始的页眉边界，需要人工复核。\n应改为：{rule.expected}",
                 category=rule.category,
                 location="document header start",
             )
@@ -1793,12 +1822,12 @@ def collect_section_issues(document: Document) -> list[Issue]:
             issues.append(
                 Issue(
                     paragraph_index=-1,
-                    rule_key="page_header_before_declaration",
+                    rule_key="page_header_missing",
                     text_type=rule.label,
                     text_excerpt=f"section {sec_idx} header",
                     current=header_text,
-                    expected="页眉应从声明页开始；封面及声明页之前的部分不应添加该页眉。",
-                    message=f"文本类型：{rule.label}\n当前格式：声明页之前已存在页眉：{header_text}\n应改为：封面及声明页之前不添加该页眉。",
+                    expected="封面 section 不应添加该页眉。",
+                    message=f"文本类型：{rule.label}\n当前格式：封面 section 已存在页眉：{header_text}\n应改为：封面 section 不添加该页眉。",
                     category=rule.category,
                     location=f"section {sec_idx} header",
                 )
@@ -1807,7 +1836,7 @@ def collect_section_issues(document: Document) -> list[Issue]:
             issues.append(
                 Issue(
                     paragraph_index=-1,
-                    rule_key="page_header",
+                    rule_key="page_header_missing",
                     text_type=rule.label,
                     text_excerpt=f"section {sec_idx} header",
                     current=header_text or "[empty header]",
@@ -1817,6 +1846,35 @@ def collect_section_issues(document: Document) -> list[Issue]:
                     location=f"section {sec_idx} header",
                 )
             )
+        if header_start is not None and zero_idx >= header_start:
+            para = section.header.paragraphs[0] if section.header.paragraphs else None
+            header_ok = True
+            if para is None or para.alignment != WD_ALIGN_PARAGRAPH.CENTER:
+                header_ok = False
+            if para is not None and para.runs:
+                run = para.runs[0]
+                size_ok = run.font.size is not None and approx(run.font.size.pt, 9.0, 0.1)
+                east = None
+                ascii_font = None
+                if run._element.rPr is not None and run._element.rPr.rFonts is not None:
+                    east = run._element.rPr.rFonts.get(qn("w:eastAsia"))
+                    ascii_font = run._element.rPr.rFonts.get(qn("w:ascii")) or run._element.rPr.rFonts.get(qn("w:hAnsi"))
+                if not size_ok or east != "宋体" or ascii_font != "Times New Roman":
+                    header_ok = False
+            if not header_ok:
+                issues.append(
+                    Issue(
+                        paragraph_index=-1,
+                        rule_key="page_header_format",
+                        text_type=rule.label,
+                        text_excerpt=f"section {sec_idx} header",
+                        current=header_text or "[empty header]",
+                        expected=rule.expected,
+                        message=f"文本类型：{rule.label}\n当前格式：页眉字体/字号/对齐不符合要求。\n应改为：{rule.expected}",
+                        category=rule.category,
+                        location=f"section {sec_idx} header",
+                    )
+                )
         page_kind = section_page_kinds[zero_idx] if zero_idx < len(section_page_kinds) else None
         issues.extend(collect_page_number_issues(section, sec_idx, page_kind))
     return issues

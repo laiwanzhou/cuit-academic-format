@@ -396,7 +396,7 @@
       "bold": null,
       "alignment": "center",
       "line_spacing_pt": 20,
-      "expected": "页眉：从声明页开始到最后页，标注“成都信息工程大学学士学位论文”，宋体小五9pt，居中；英文/数字Times New Roman小五9pt；封面及声明页之前不添加该页眉。"
+      "expected": "页眉标注“成都信息工程大学学士学位论文”，宋体小五号9pt，居中；英文和数字Times New Roman小五号9pt，居中。"
     },
     "front_page_number": {
       "label": "front matter page number",
