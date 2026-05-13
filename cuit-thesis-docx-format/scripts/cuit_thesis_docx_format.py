@@ -586,7 +586,9 @@ def classify_paragraph(text: str, in_body: bool, region: str = "front") -> str |
         return "table_caption"
     if re.match(r"^（?\(?\d+[-－]\d+）?\)?$", text):
         return "formula"
-    if region == "references" and re.match(r"^\[?\d+\]?[\.、]?\s*\S+", text):
+    if region == "references" and _reference_entry_start_match(text):
+        return "reference_entry"
+    if region == "references" and compact and compact != "参考文献":
         return "reference_entry"
     if region == "symbols" and len(text) >= 3:
         return "symbols_body"
@@ -2735,29 +2737,96 @@ def _reference_entries_from_regions(paragraphs, texts: list[str], regions: list[
     entries: list[dict[str, object]] = []
     issues: list[Issue] = []
     current: dict[str, object] | None = None
+    inferred_no = 1
     for idx, paragraph in enumerate(paragraphs):
         if idx >= len(regions) or regions[idx] != "references":
             continue
         text = paragraph_text(paragraph).strip()
         if not text:
             continue
-        if classify_paragraph(text, in_body=False, region="references") != "reference_entry":
+        if compact_text(text) == "参考文献":
             continue
-        number_match = re.match(r"^\[?(\d+)\]?", text)
+        number_match = _reference_entry_start_match(text)
         if number_match:
             current = {
                 "start_idx": idx,
-                "number": int(number_match.group(1)),
+                "number": int((number_match.group(1) or number_match.group(2))),
                 "parts": [text],
+                "paragraph_indices": [idx],
             }
             entries.append(current)
+            inferred_no = int(current["number"]) + 1
+            continue
+        if _looks_like_reference_entry_text(text):
+            current = {
+                "start_idx": idx,
+                "number": inferred_no,
+                "parts": [text],
+                "paragraph_indices": [idx],
+            }
+            entries.append(current)
+            inferred_no += 1
+            issues.append(_issue_global("reference_entry_number_missing", "reference entry", "条目缺少序号。", "参考文献条目应以连续[序号]开头。", "references", f"paragraph {idx}", text[:120]))
             continue
         if current is None:
             issues.append(_issue_global("reference_entry_number_missing", "reference entry", "条目缺少序号。", "参考文献条目应以连续[序号]开头。", "references", f"paragraph {idx}", text[:120]))
             continue
         current["parts"].append(text)
+        current["paragraph_indices"].append(idx)
         issues.append(_issue_global("reference_entry_continuation_review", "reference entry continuation", "疑似参考文献续行，需要人工确认。", "参考文献续行应与上一条合并核对著录格式。", "references", f"paragraph {idx}", text[:120]))
     return entries, issues
+
+
+def _reference_entry_start_match(text: str):
+    return re.match(r"^\s*(?:\[(\d+)\]|(\d+)(?:[\.\u3001]|\s+))\s*\S+", text)
+
+
+def _looks_like_reference_entry_text(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if _reference_type_marker(stripped):
+        return True
+    has_year = bool(re.search(r"(19|20)\d{2}", stripped))
+    has_ref_punc = "." in stripped or "：" in stripped or ":" in stripped
+    return has_year and has_ref_punc and len(stripped) >= 12
+
+
+def _reference_272_check_summary(entries: list[dict[str, object]]) -> dict[str, object]:
+    summary_entries: list[dict[str, object]] = []
+    matched = 0
+    unmatched = 0
+    mismatch = 0
+    for entry in entries:
+        text = " ".join(str(x).strip() for x in entry["parts"]).strip()
+        marker = _reference_type_marker(text)
+        matched_formats, missing_map = _matches_any_272_format(text, marker)
+        status = "matched"
+        if marker and marker in REFERENCE_272_FORMATS and marker not in matched_formats:
+            status = "type_mismatch"
+            mismatch += 1
+        elif not matched_formats:
+            status = "no_match"
+            unmatched += 1
+        else:
+            matched += 1
+        summary_entries.append(
+            {
+                "index": int(entry["number"]),
+                "text_excerpt": text[:160],
+                "detected_type": marker or "",
+                "matched_template": matched_formats[0] if matched_formats else "",
+                "status": status,
+                "missing_fields": missing_map.get(marker or "", []),
+            }
+        )
+    return {
+        "total_entries": len(entries),
+        "matched_entries": matched,
+        "unmatched_entries": unmatched,
+        "type_mismatch_entries": mismatch,
+        "entries": summary_entries,
+    }
 
 
 def collect_reference_issues(document: Document) -> list[Issue]:
@@ -2766,6 +2835,19 @@ def collect_reference_issues(document: Document) -> list[Issue]:
     regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
     entries, entry_issues = _reference_entries_from_regions(document.paragraphs, texts, regions)
     issues.extend(entry_issues)
+    if not entries:
+        reference_title_idx = next((i for i, t in enumerate(texts) if re.match(r"^\s*\u53c2\u8003\u6587\u732e\s*$", t.strip())), -1)
+        if reference_title_idx >= 0:
+            fallback_regions = ["other"] * len(texts)
+            for i in range(reference_title_idx + 1, len(texts)):
+                fallback_regions[i] = "references"
+            entries, entry_issues = _reference_entries_from_regions(document.paragraphs, texts, fallback_regions)
+            issues.extend(entry_issues)
+    has_reference_title = any(idx < len(regions) and regions[idx] == "references" and compact_text(paragraph_text(p)) == "参考文献" for idx, p in enumerate(document.paragraphs))
+    if not has_reference_title:
+        has_reference_title = any(re.match(r"^\s*\u53c2\u8003\u6587\u732e\s*$", paragraph_text(p).strip()) for p in document.paragraphs)
+    if has_reference_title and not entries:
+        issues.append(_issue_global("reference_entries_not_detected", "reference entries detection", "已检测到参考文献标题，但未能识别参考文献条目。", "请检查分段或编号格式，使条目能被识别并检查。", "references", "references section"))
     expected_no = 1
     for entry in entries:
         idx = int(entry["start_idx"])
@@ -2806,7 +2888,7 @@ def collect_reference_issues(document: Document) -> list[Issue]:
                 )
             )
 
-        if not matched_formats:
+        if not matched_formats and not (marker and marker in REFERENCE_272_FORMATS):
             tried = "/".join([k for k in REFERENCE_272_FORMATS.keys()])
             missing_summary = "; ".join(
                 f"{k}: {('、'.join(v) if v else '要素未完整匹配')}" for k, v in missing_map.items()
@@ -3038,6 +3120,13 @@ def apply_supported_rules(document: Document, allow_layout_fixes: bool) -> None:
                 normalized_text = normalize_body_cjk_spacing(paragraph.text)
                 if normalized_text != paragraph.text:
                     _apply_text_to_runs(paragraph, normalized_text)
+    texts_after = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions_after = analyze_section_sequence(texts_after, has_toc_field=document_has_toc_field(document))["regions"]
+    ref_entries, _ref_issues = _reference_entries_from_regions(document.paragraphs, texts_after, regions_after)
+    for entry in ref_entries:
+        for pidx in entry.get("paragraph_indices", []):
+            if 0 <= pidx < len(document.paragraphs):
+                apply_rule(document.paragraphs[pidx], RULES["reference_entry"])
     texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
     regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
     cleanup_visible_blank_paragraphs_after_layout(document)
@@ -3913,6 +4002,9 @@ def run(
         normalized_doc = Document(str(temp_path))
         source_texts = [paragraph_text(paragraph) for paragraph in normalized_doc.paragraphs]
         structure_analysis = analyze_section_sequence(source_texts, has_toc_field=document_has_toc_field(normalized_doc))
+        source_regions = structure_analysis["regions"]
+        ref_entries_for_summary, _ref_entry_issues = _reference_entries_from_regions(normalized_doc.paragraphs, source_texts, source_regions)
+        reference_272_check_summary = _reference_272_check_summary(ref_entries_for_summary)
         issues = collect_issues(normalized_doc)
         create_annotated_docx(temp_path, comments_path, issues)
 
@@ -4029,6 +4121,7 @@ def run(
         "screenshot_status": screenshot_status,
         "render_qa": render_qa,
         "structure_analysis": structure_analysis,
+        "reference_272_check_summary": reference_272_check_summary,
         "structure_warnings": structure_analysis.get("warnings", []) + compute_section_boundary_findings(source_texts, structure_analysis["regions"])[0] + compute_section_boundary_findings(source_texts, structure_analysis["regions"])[1],
         "issues": [issue_dict(issue) for issue in issues],
         "unsupported_or_advisory": advisory,

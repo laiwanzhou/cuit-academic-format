@@ -160,6 +160,61 @@ def test_reference_checks_scope_only_references():
     assert issues == []
 
 
+def test_reference_entries_are_formatted():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("参考文献")
+    p = doc.add_paragraph("[1] 张三. 题名[J]. 刊名, 2020, 1(2):3-5.")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["references", "references"]}
+    mod.apply_supported_rules(doc, allow_layout_fixes=False)
+    rule = mod.RULES["reference_entry"]
+    assert mod.paragraph_matches(p, rule)
+    ind = p._p.pPr.ind
+    assert ind is not None
+    assert ind.get(mod.qn("w:hangingChars")) == "200"
+    assert ind.get(mod.qn("w:hanging")) is None
+
+
+def test_all_reference_entries_collected():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("参考文献")
+    for i in range(1, 6):
+        doc.add_paragraph(f"[{i}] 作者. 题名[J]. 刊名, 2020, 1(2):3-5.")
+    texts = [mod.paragraph_text(p) for p in doc.paragraphs]
+    regions = ["references"] * len(texts)
+    entries, _issues = mod._reference_entries_from_regions(doc.paragraphs, texts, regions)
+    assert len(entries) == 5
+    summary = mod._reference_272_check_summary(entries)
+    assert summary["total_entries"] == 5
+    assert len(summary["entries"]) == 5
+
+
+def test_reference_entries_not_detected_when_title_exists():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("参考文献")
+    doc.add_paragraph("这是一段没有编号的内容")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["references", "references"]}
+    issues = mod.collect_reference_issues(doc)
+    keys = {i.rule_key for i in issues}
+    assert "reference_entries_not_detected" in keys
+
+
+def test_reference_entry_formatting_does_not_touch_body():
+    mod = load_module()
+    doc = mod.Document()
+    body = doc.add_paragraph("这是正文段落。")
+    ref_title = doc.add_paragraph("参考文献")
+    ref = doc.add_paragraph("[1] 作者. 题名[J]. 刊名, 2020, 1(2):3-5.")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["body", "references", "references"]}
+    old = body.text
+    mod.apply_supported_rules(doc, allow_layout_fixes=False)
+    assert body.text == old
+    assert mod.paragraph_matches(ref_title, mod.RULES["reference_title"])
+    assert mod.paragraph_matches(ref, mod.RULES["reference_entry"])
+
+
 def test_empty_paragraph_cleanup_targets():
     mod = load_module()
     doc = mod.Document()
