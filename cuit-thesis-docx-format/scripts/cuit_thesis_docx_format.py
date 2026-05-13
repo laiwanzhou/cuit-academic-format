@@ -1154,13 +1154,116 @@ def document_has_toc_field(document: Document) -> bool:
     return "TOC" in xml and "instrText" in xml
 
 
+def detect_toc_field_paragraph(paragraph) -> bool:
+    for node in paragraph._p.iter():
+        if node.tag == qn("w:instrText") and "TOC" in (node.text or "").upper():
+            return True
+        if node.tag == qn("w:fldSimple") and "TOC" in (node.get(qn("w:instr")) or "").upper():
+            return True
+    return False
+
+
+def _is_toc_title_text(text: str) -> bool:
+    compact = compact_text(text or "")
+    return compact in {"目录", "目錄", "目次"} or (text or "").strip() == "目 录"
+
+
+def _is_probable_toc_entry_text(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    has_leader = "..." in stripped or "……" in stripped or bool(re.search(r"\.{4,}", stripped))
+    has_tail_number = bool(re.search(r"\d+\s*$", stripped))
+    return has_leader and has_tail_number
+
+
+def detect_toc_field_range(document: Document) -> tuple[int | None, int | None]:
+    start_idx: int | None = None
+    end_idx: int | None = None
+    in_toc_field = False
+    pending_begin = False
+    for idx, paragraph in enumerate(document.paragraphs):
+        para_has_toc_instr = False
+        if detect_toc_field_paragraph(paragraph):
+            para_has_toc_instr = True
+        for node in paragraph._p.iter():
+            if node.tag == qn("w:fldSimple") and "TOC" in (node.get(qn("w:instr")) or "").upper():
+                para_has_toc_instr = True
+                in_toc_field = True
+                if start_idx is None:
+                    start_idx = idx
+            elif node.tag == qn("w:fldChar"):
+                fld_type = node.get(qn("w:fldCharType"))
+                if fld_type == "begin":
+                    pending_begin = True
+                elif fld_type == "end" and in_toc_field:
+                    end_idx = idx
+                    in_toc_field = False
+                    pending_begin = False
+            elif node.tag == qn("w:instrText") and "TOC" in (node.text or "").upper():
+                para_has_toc_instr = True
+                if pending_begin or not in_toc_field:
+                    in_toc_field = True
+                    if start_idx is None:
+                        start_idx = idx
+                    pending_begin = False
+        if in_toc_field or para_has_toc_instr:
+            if start_idx is None:
+                start_idx = idx
+            end_idx = idx
+    return start_idx, end_idx
+
+
+def find_toc_region_by_field_or_title(document: Document, section_regions: list[str]) -> tuple[int | None, int | None]:
+    start_idx, end_idx = detect_toc_field_range(document)
+    if start_idx is None:
+        for idx, paragraph in enumerate(document.paragraphs):
+            text = paragraph_text(paragraph)
+            if _is_toc_title_text(text):
+                start_idx = idx
+                end_idx = idx
+                break
+    if start_idx is None:
+        return None, None
+
+    cursor = (end_idx if end_idx is not None else start_idx) + 1
+    while cursor < len(document.paragraphs):
+        text = paragraph_text(document.paragraphs[cursor])
+        region = section_regions[cursor] if cursor < len(section_regions) else ""
+        if region == "body" and not _is_probable_toc_entry_text(text):
+            break
+        if _is_probable_toc_entry_text(text) or region == "toc":
+            end_idx = cursor
+            cursor += 1
+            continue
+        if not text.strip():
+            end_idx = cursor
+            cursor += 1
+            continue
+        break
+    return start_idx, end_idx
+
+
+def find_first_body_paragraph_after_toc(document: Document, regions: list[str]) -> int | None:
+    toc_start, toc_end = find_toc_region_by_field_or_title(document, regions)
+    start_idx = (toc_end + 1) if toc_end is not None else 0
+    for idx in range(start_idx, len(document.paragraphs)):
+        text = paragraph_text(document.paragraphs[idx]).strip()
+        region = regions[idx] if idx < len(regions) else ""
+        if region == "body" and not _is_probable_toc_entry_text(text):
+            return idx
+    for idx in range(len(document.paragraphs)):
+        text = paragraph_text(document.paragraphs[idx]).strip()
+        region = regions[idx] if idx < len(regions) else ""
+        if region == "body" and not _is_probable_toc_entry_text(text):
+            return idx
+    return None
+
+
 def first_body_paragraph_index(document: Document) -> int | None:
     texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
     regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
-    for idx, region in enumerate(regions):
-        if region == "body":
-            return idx
-    return None
+    return find_first_body_paragraph_after_toc(document, regions)
 
 
 def ensure_body_starts_new_page_number_section(document: Document) -> bool:
@@ -1367,11 +1470,14 @@ def apply_page_number_formats(document: Document) -> None:
     texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
     regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
     ranges = section_paragraph_ranges(document)
+    toc_start, toc_end = find_toc_region_by_field_or_title(document, regions)
+    first_body_idx = find_first_body_paragraph_after_toc(document, regions)
     front_started = False
     main_started = False
     decisions: list[tuple[int, str, int | None]] = []
     abstract_or_toc_sections: list[int] = []
     body_or_later_sections: list[int] = []
+
     for section_idx, _section in enumerate(document.sections):
         start, end = ranges[section_idx] if section_idx < len(ranges) else (0, -1)
         section_regions = set(regions[start : end + 1]) if start <= end else set()
@@ -1383,7 +1489,10 @@ def apply_page_number_formats(document: Document) -> None:
             or bool(re.search(r"\.{6,}", sec_text))
             or ("论文总页数" in sec_text)
         )
-        if {"declaration", "abstract_zh", "abstract_en", "toc"} & section_regions:
+        section_has_toc_field = (
+            toc_start is not None and toc_end is not None and start <= toc_end and end >= toc_start
+        )
+        if {"declaration", "abstract_zh", "abstract_en", "toc"} & section_regions or section_has_toc_field:
             abstract_or_toc_sections.append(section_idx)
         elif looks_like_toc_section:
             abstract_or_toc_sections.append(section_idx)
@@ -1392,8 +1501,17 @@ def apply_page_number_formats(document: Document) -> None:
 
     first_front = min(abstract_or_toc_sections) if abstract_or_toc_sections else None
     last_known_front = max(abstract_or_toc_sections) if abstract_or_toc_sections else None
-    main_candidates = [idx for idx in body_or_later_sections if last_known_front is None or idx > last_known_front]
-    first_main = min(main_candidates) if main_candidates else None
+
+    first_main = None
+    if first_body_idx is not None:
+        for section_idx, (start, end) in enumerate(ranges):
+            if start <= first_body_idx <= end:
+                first_main = section_idx
+                break
+    if first_main is None:
+        main_candidates = [idx for idx in body_or_later_sections if last_known_front is None or idx > last_known_front]
+        first_main = min(main_candidates) if main_candidates else None
+
     last_front = None
     if first_front is not None and first_main is not None and first_main >= first_front:
         last_front = first_main - 1
@@ -1870,7 +1988,7 @@ def cleanup_module_boundary_blank_paragraphs(
                         )
                         if has_sectpr and not _migrate_sectpr_to_previous_paragraph(document, blank_idx, i):
                             continue
-                        if is_toc_placeholder or has_sectpr or has_page_break or _blank_paragraph_has_only_safe_boundary_nodes(blank):
+                        if (not is_toc_placeholder) and (has_sectpr or has_page_break or _blank_paragraph_has_only_safe_boundary_nodes(blank)):
                             blank._element.getparent().remove(blank._element)
                             removed += 1
                 issues.append(
@@ -2122,10 +2240,14 @@ def _section_matches(section) -> bool:
 def _section_page_kinds(document: Document, regions: list[str]) -> list[str | None]:
     kinds: list[str | None] = []
     ranges = section_paragraph_ranges(document)
+    toc_start, toc_end = find_toc_region_by_field_or_title(document, regions)
     for section_idx, _section in enumerate(document.sections):
         start, end = ranges[section_idx] if section_idx < len(ranges) else (0, -1)
         section_regions = set(regions[start : end + 1]) if start <= end else set()
-        if {"declaration", "abstract_zh", "abstract_en", "toc"} & section_regions:
+        section_has_toc_field = (
+            toc_start is not None and toc_end is not None and start <= toc_end and end >= toc_start
+        )
+        if {"declaration", "abstract_zh", "abstract_en", "toc"} & section_regions or section_has_toc_field:
             kinds.append("front")
         elif {"body", "references", "appendix", "acknowledgement"} & section_regions:
             kinds.append("main")
@@ -2152,6 +2274,28 @@ def collect_section_issues(document: Document) -> list[Issue]:
             )
         )
     section_page_kinds = _section_page_kinds(document, regions)
+    toc_start, toc_end = find_toc_region_by_field_or_title(document, regions)
+    body_start = find_first_body_paragraph_after_toc(document, regions)
+    if toc_start is not None and body_start is not None:
+        ranges = section_paragraph_ranges(document)
+        toc_section = None
+        body_section = None
+        for section_idx, (start, end) in enumerate(ranges):
+            if start <= toc_start <= end:
+                toc_section = section_idx
+            if start <= body_start <= end:
+                body_section = section_idx
+        if toc_section is not None and body_section is not None and toc_section == body_section:
+            issues.append(
+                _issue_global(
+                    "toc_body_same_section",
+                    "TOC/body section boundary",
+                    f"TOC 与正文起始位于同一 section（section {toc_section + 1}）。",
+                    "TOC 与正文应位于不同 section，确保前置页 lowerRoman、正文 decimal 且从 1 开始。",
+                    "page",
+                    f"section {toc_section + 1}",
+                )
+            )
     header_start, header_reason = find_header_start_section(document)
     if header_reason in {"not-found", "fallback-second-section"}:
         rule = RULES["page_header"]
@@ -4187,12 +4331,21 @@ def stdout_json(report: dict[str, object]) -> str:
     return json.dumps(report, ensure_ascii=True, indent=2)
 
 
+def build_run_timestamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def append_timestamp_to_name(path: Path, run_timestamp: str) -> Path:
+    return path.with_name(f"{path.stem}_{run_timestamp}{path.suffix}")
+
+
 def run(
     input_path: Path,
     output_dir: Path,
     renderer: str,
     screenshots: str,
     allow_ooxml_layout_fixes: bool = False,
+    run_timestamp: str | None = None,
 ) -> dict[str, object]:
     require_docx_dependencies()
     if not input_path.exists():
@@ -4200,11 +4353,12 @@ def run(
     if not is_docx(input_path):
         raise ValueError("Input must be a .docx file.")
     output_dir.mkdir(parents=True, exist_ok=True)
+    run_timestamp = run_timestamp or build_run_timestamp()
 
-    comments_path = output_dir / f"{input_path.stem}_format_comments.docx"
-    fixed_path = output_dir / f"{input_path.stem}_format_fixed.docx"
-    report_path = output_dir / f"{input_path.stem}_format_report.json"
-    html_report_path = output_dir / f"{input_path.stem}_format_report.html"
+    comments_path = append_timestamp_to_name(output_dir / f"{input_path.stem}_format_comments.docx", run_timestamp)
+    fixed_path = append_timestamp_to_name(output_dir / f"{input_path.stem}_format_fixed.docx", run_timestamp)
+    report_path = append_timestamp_to_name(output_dir / f"{input_path.stem}_format_report.json", run_timestamp)
+    html_report_path = append_timestamp_to_name(output_dir / f"{input_path.stem}_format_report.html", run_timestamp)
 
     source_doc = Document(str(input_path))
     source_image_count = count_document_images(source_doc)
@@ -4239,6 +4393,10 @@ def run(
     fixed_doc_for_counts = Document(str(fixed_path))
     fixed_image_count = count_document_images(fixed_doc_for_counts)
     fixed_figure_caption_count = count_figure_captions(fixed_doc_for_counts)
+    fixed_section_issues = collect_section_issues(fixed_doc_for_counts)
+    page_rule_keys = {"front_page_number", "main_page_number", "toc_body_same_section"}
+    issues = [issue for issue in issues if issue.rule_key not in page_rule_keys]
+    issues.extend([issue for issue in fixed_section_issues if issue.rule_key in page_rule_keys])
     if fixed_image_count < source_image_count:
         issues.append(
             Issue(
@@ -4311,6 +4469,7 @@ def run(
     )
 
     report = {
+        "run_timestamp": run_timestamp,
         "input": str(input_path.resolve()),
         "annotated_docx": str(comments_path.resolve()),
         "fixed_docx": str(fixed_path.resolve()),
@@ -4365,6 +4524,7 @@ def main() -> int:
             "(headers, footers, page numbers, header/footer distance, and section behavior)."
         ),
     )
+    parser.add_argument("--run-timestamp", default=None, help="Optional run timestamp in yyyyMMdd_HHmmss.")
     args = parser.parse_args()
     report = run(
         Path(args.docx),
@@ -4372,6 +4532,7 @@ def main() -> int:
         args.renderer,
         args.screenshots,
         allow_ooxml_layout_fixes=args.allow_ooxml_layout_fixes,
+        run_timestamp=args.run_timestamp,
     )
     print(stdout_json(report))
     return 0
