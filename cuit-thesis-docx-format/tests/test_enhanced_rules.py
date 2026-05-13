@@ -826,7 +826,8 @@ def test_remove_toc_field_placeholder_blank_after_english_keywords():
     texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
     key_idx = texts.index("Key words: Data visualization")
     body_idx = texts.index("1 引 言")
-    assert body_idx == key_idx + 1
+    assert body_idx > key_idx + 1
+    assert doc.paragraphs[body_idx].paragraph_format.page_break_before is not True
 
 
 def test_keywords_cleanup_does_not_cross_toc_to_body():
@@ -1232,3 +1233,104 @@ def test_toc_page_number_still_report_only():
     issues = mod.detect_toc_manual_review_issues(doc)
     keys = {i.rule_key for i in issues}
     assert "toc_page_number_manual_review" in keys
+
+
+def test_toc_style_empty_paragraph_can_be_cleaned_if_no_toc_field():
+    mod = load_module()
+    doc = mod.Document()
+    p = doc.add_paragraph("")
+    ppr = p._p.get_or_add_pPr()
+    pstyle = mod.OxmlElement("w:pStyle")
+    pstyle.set(mod.qn("w:val"), "TOC1")
+    ppr.append(pstyle)
+    assert mod._is_effectively_blank_paragraph(p) is True
+
+
+def test_real_toc_field_paragraph_is_not_deleted():
+    mod = load_module()
+    doc = mod.Document()
+    key = doc.add_paragraph("Key words: a; b; c")
+    toc_field = doc.add_paragraph("")
+    ppr = toc_field._p.get_or_add_pPr()
+    pstyle = mod.OxmlElement("w:pStyle")
+    pstyle.set(mod.qn("w:val"), "TOC1")
+    ppr.append(pstyle)
+    run = toc_field._p.add_r()
+    instr = mod.OxmlElement("w:instrText")
+    instr.text = ' TOC \\o "1-3" \\h \\z \\u '
+    run.append(instr)
+    doc.add_paragraph("目 录")
+    regions = ["abstract_en", "abstract_en", "toc"]
+    _issues, _removed = mod.cleanup_module_boundary_blank_paragraphs(doc, regions=regions, apply_changes=True)
+    texts = [mod.paragraph_text(x) for x in doc.paragraphs]
+    assert len(texts) == 3
+    assert mod._paragraph_has_toc_field(doc.paragraphs[1]) is True
+    assert key.text.startswith("Key words")
+
+
+def test_keywords_to_toc_no_blank_page():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("ABSTRACT")
+    doc.add_paragraph("English abstract body")
+    doc.add_paragraph("Key words: x")
+    blank = doc.add_paragraph("")
+    br_run = blank._p.add_r()
+    br = mod.OxmlElement("w:br")
+    br.set(mod.qn("w:type"), "page")
+    br_run.append(br)
+    toc = doc.add_paragraph("目 录")
+    doc.add_paragraph("论文总页数：32页")
+    intro = doc.add_paragraph("1 引 言")
+    before_sections = len(doc.sections)
+    mod.ensure_toc_starts_new_page(doc)
+    texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
+    assert "Key words: x" in texts
+    assert "目 录" in texts
+    assert toc.paragraph_format.page_break_before is True
+    assert len(doc.sections) == before_sections
+    assert intro.paragraph_format.page_break_before is not True
+
+
+def test_ensure_toc_starts_new_page_removes_prior_safe_blank_break():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("Key words: x")
+    blank = doc.add_paragraph("")
+    br_run = blank._p.add_r()
+    br = mod.OxmlElement("w:br")
+    br.set(mod.qn("w:type"), "page")
+    br_run.append(br)
+    toc = doc.add_paragraph("目 录")
+    before = len(doc.paragraphs)
+    before_sections = len(doc.sections)
+    changed = mod.ensure_toc_starts_new_page(doc)
+    assert changed is True
+    assert toc.paragraph_format.page_break_before is True
+    assert len(doc.paragraphs) == before - 1
+    assert len(doc.sections) == before_sections
+
+
+def test_ensure_toc_starts_new_page_does_not_delete_sectpr_blank():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("Key words: x")
+    blank = doc.add_paragraph("")
+    blank._p.get_or_add_pPr().append(mod.OxmlElement("w:sectPr"))
+    doc.add_paragraph("目 录")
+    before = len(doc.paragraphs)
+    mod.ensure_toc_starts_new_page(doc)
+    assert len(doc.paragraphs) == before
+
+
+def test_find_toc_start_ignores_empty_toc_style_without_field():
+    mod = load_module()
+    doc = mod.Document()
+    p = doc.add_paragraph("")
+    ppr = p._p.get_or_add_pPr()
+    pstyle = mod.OxmlElement("w:pStyle")
+    pstyle.set(mod.qn("w:val"), "TOC1")
+    ppr.append(pstyle)
+    doc.add_paragraph("目 录")
+    idx = mod.find_toc_start_paragraph_index(doc)
+    assert idx == 1

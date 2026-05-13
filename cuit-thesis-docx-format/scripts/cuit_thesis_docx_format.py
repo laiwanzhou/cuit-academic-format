@@ -1666,8 +1666,7 @@ def _blank_paragraph_has_risky_nodes(paragraph) -> bool:
 
 
 def _is_effectively_blank_paragraph(paragraph) -> bool:
-    style_name = (paragraph.style.name if paragraph.style else "").lower()
-    if style_name.startswith("toc"):
+    if _paragraph_has_toc_field(paragraph):
         return False
     if not _is_target_empty_paragraph_text(paragraph.text):
         return False
@@ -1748,7 +1747,9 @@ def _migrate_sectpr_to_previous_paragraph(document: Document, blank_idx: int, pr
 
 
 def _blank_paragraph_is_toc_field_placeholder(paragraph) -> bool:
-    if not _is_effectively_blank_paragraph(paragraph):
+    if not _is_target_empty_paragraph_text(paragraph.text):
+        return False
+    if _paragraph_has_image_payload(paragraph):
         return False
     has_toc_instr = False
     has_field_char = False
@@ -2463,13 +2464,6 @@ def find_toc_start_paragraph_index(document: Document) -> int | None:
         stripped = text.strip()
         if re.search(r"(\.{2,}|…+)\s*\d+\s*$", stripped) and ("引言" in stripped or "章" in stripped):
             return idx
-    for idx, paragraph in enumerate(document.paragraphs):
-        style_name = (paragraph.style.name if paragraph.style else "").lower()
-        if style_name.startswith("toc"):
-            return idx
-    for idx, text in enumerate(texts):
-        if "论文总页数" in text:
-            return idx - 1 if idx > 0 else idx
     return None
 
 
@@ -2491,15 +2485,26 @@ def ensure_toc_starts_new_page(document: Document) -> bool:
     if toc_paragraph.paragraph_format.page_break_before is not True:
         toc_paragraph.paragraph_format.page_break_before = True
         changed = True
-    if toc_idx > 0:
-        prev = document.paragraphs[toc_idx - 1]
-        if (
-            _is_effectively_blank_paragraph(prev)
-            and _paragraph_has_page_break_node(prev)
-            and not _blank_paragraph_has_risky_nodes(prev)
-        ):
-            prev._element.getparent().remove(prev._element)
-            changed = True
+    remove_indexes: list[int] = []
+    scan = toc_idx - 1
+    while scan >= 0:
+        prev = document.paragraphs[scan]
+        if not _is_effectively_blank_paragraph(prev):
+            break
+        ppr = prev._p.pPr
+        if ppr is not None and ppr.find(qn("w:sectPr")) is not None:
+            break
+        if _blank_paragraph_is_toc_field_placeholder(prev):
+            break
+        if _paragraph_has_page_break_node(prev) and _blank_paragraph_has_only_safe_boundary_nodes(prev):
+            remove_indexes.append(scan)
+            scan -= 1
+            continue
+        break
+    for idx in remove_indexes:
+        paragraph = document.paragraphs[idx]
+        paragraph._element.getparent().remove(paragraph._element)
+        changed = True
     return changed
 
 
