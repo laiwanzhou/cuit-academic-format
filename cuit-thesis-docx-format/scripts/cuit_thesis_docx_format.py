@@ -2926,6 +2926,17 @@ def _has_online_path(text: str) -> bool:
     return bool(re.search(r"https?://|www\.|doi\.org|DOI\s*[:：]|doi\s*[:：]", text, re.I))
 
 
+def _has_doi_or_url(text: str) -> bool:
+    return _has_online_path(text)
+
+
+def _is_online_reference_marker(marker: str | None) -> bool:
+    if not marker:
+        return False
+    marker_u = marker.upper()
+    return marker_u in {"EB/OL", "DB/OL", "CP/OL", "J/OL"} or marker_u.endswith("/OL")
+
+
 def _has_year(text: str) -> bool:
     return bool(re.search(r"(19|20)\d{2}", text))
 
@@ -3154,6 +3165,62 @@ def _reference_272_check_summary(entries: list[dict[str, object]]) -> dict[str, 
     }
 
 
+def _reference_273_check_summary(entries: list[dict[str, object]]) -> dict[str, object]:
+    summary_entries: list[dict[str, object]] = []
+    online_entries = 0
+    author_et_al_review_entries = 0
+    citation_date_missing_entries = 0
+    access_path_missing_entries = 0
+    doi_or_url_missing_entries = 0
+    for entry in entries:
+        text = " ".join(str(x).strip() for x in entry["parts"]).strip()
+        marker = _reference_type_marker(text)
+        head_part = text.split(".", 1)[0]
+        author_items = [x.strip() for x in re.split(r"[,，、;；]|(?:\band\b)|&", head_part) if x.strip()]
+        needs_et_al_review = (len(author_items) >= 4 and ("等" not in head_part and "et al" not in text.lower())) or ("等" in head_part and len(author_items) < 3)
+
+        is_online = _is_online_reference_marker(marker) or ("http" in text.lower()) or ("doi" in text.lower())
+        citation_date_missing = False
+        access_path_missing = False
+        doi_or_url_missing = False
+        if is_online:
+            online_entries += 1
+            citation_date_missing = not _has_citation_date(text)
+            access_path_missing = not _has_online_path(text)
+            doi_or_url_missing = not _has_doi_or_url(text)
+            citation_date_missing_entries += 1 if citation_date_missing else 0
+            access_path_missing_entries += 1 if access_path_missing else 0
+            doi_or_url_missing_entries += 1 if doi_or_url_missing else 0
+
+        if needs_et_al_review:
+            author_et_al_review_entries += 1
+
+        summary_entries.append(
+            {
+                "index": int(entry["number"]),
+                "visual_index": int(entry.get("visual_index", entry["number"])),
+                "paragraph_index": int(entry.get("start_idx", -1)),
+                "detected_type": marker or "",
+                "text_excerpt": text[:160],
+                "is_online_entry": is_online,
+                "author_et_al_review": needs_et_al_review,
+                "citation_date_missing": citation_date_missing,
+                "access_path_missing": access_path_missing,
+                "doi_or_url_missing": doi_or_url_missing,
+            }
+        )
+
+    return {
+        "total_entries": len(entries),
+        "online_entries": online_entries,
+        "author_et_al_review_entries": author_et_al_review_entries,
+        "citation_date_missing_entries": citation_date_missing_entries,
+        "access_path_missing_entries": access_path_missing_entries,
+        "doi_or_url_missing_entries": doi_or_url_missing_entries,
+        "entries": summary_entries,
+    }
+
+
 def collect_reference_issues(document: Document) -> list[Issue]:
     issues: list[Issue] = []
     texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
@@ -3200,18 +3267,20 @@ def collect_reference_issues(document: Document) -> list[Issue]:
             missing_summary = "; ".join(f"{k}: {('、'.join(v) if v else '要素未完整匹配')}" for k, v in missing_map.items())
             issues.append(_reference_issue(idx, "reference_272_format_no_match", "reference entry 2.7.2 format", f"当前条目未匹配{tried}任一种格式；类型标识={marker or '无'}；缺失要素：{missing_summary}", "参考文献条目应符合2.7.2中至少一种主要参考文献著录格式。", text[:220]))
 
-        online_source = _has_online_path(text)
-        if online_source and not _has_citation_date(text):
-            issues.append(_reference_issue(idx, "reference_273_online_access_missing", "reference entry 2.7.3 online access", "条目含在线来源特征(URL/DOI)但缺少[引用日期]。", "网上获取文献应补充[引用日期]、获取和访问路径、DOI或数字对象唯一标识符。", text[:200]))
-        if marker == "EB/OL" and not _has_online_path(text):
-            issues.append(_reference_issue(idx, "reference_273_online_access_missing", "reference entry 2.7.3 online access", "电子资源[EB/OL]缺少访问路径。", "电子资源应包含获取和访问路径，并建议标注DOI或唯一标识符。", text[:200]))
+        is_online = _is_online_reference_marker(marker) or ("http" in text.lower()) or ("doi" in text.lower())
+        if is_online and not _has_online_path(text):
+            issues.append(_reference_issue(idx, "reference_273_online_access_missing", "reference entry 2.7.3 online access", "在线文献缺少访问路径。", "网上获取文献应补充获取和访问路径。", text[:200]))
+        if is_online and not _has_citation_date(text):
+            issues.append(_reference_issue(idx, "reference_273_citation_date_missing", "reference entry 2.7.3 citation date", "在线文献缺少引用日期。", "网上获取文献应补充[引用日期]。", text[:200]))
+        if is_online and not _has_doi_or_url(text):
+            issues.append(_reference_issue(idx, "reference_273_doi_or_url_missing", "reference entry 2.7.3 DOI/URL", "在线文献缺少 DOI 或 URL。", "网上获取文献应包含 DOI 或 URL。", text[:200]))
 
         head_part = text.split(".", 1)[0]
         author_items = [x.strip() for x in re.split(r"[,，、;；]|(?:\band\b)|&", head_part) if x.strip()]
         if len(author_items) >= 4 and ("等" not in head_part and "et al" not in text.lower()):
-            issues.append(_reference_issue(idx, "reference_273_author_et_al", "reference entry 2.7.3 author list", "责任者疑似超过3人但未标注“等”或“et al.”。", "多人作者建议列前3位后加“等”；该检查为启发式，需要人工确认。", text[:200]))
+            issues.append(_reference_issue(idx, "reference_273_author_et_al_review", "reference entry 2.7.3 author list", "责任者疑似超过3人但未标注“等”或“et al.”。", "多人作者建议列前3位后加“等”；该检查为启发式，需要人工确认。", text[:200]))
         if "等" in head_part and len(author_items) < 3:
-            issues.append(_reference_issue(idx, "reference_273_author_et_al", "reference entry 2.7.3 author list", "责任者包含“等”，但前置作者数量疑似不足3位。", "作者数量与“等”用法需人工确认；该检查为启发式。", text[:200]))
+            issues.append(_reference_issue(idx, "reference_273_author_et_al_review", "reference entry 2.7.3 author list", "责任者包含“等”，但前置作者数量疑似不足3位。", "作者数量与“等”用法需人工确认；该检查为启发式。", text[:200]))
     return issues
 
 def _shape_cm(value) -> float | None:
@@ -4115,6 +4184,9 @@ def attach_after_formats(fixed_path: Path, issues: list[Issue]) -> None:
 
 
 def issue_dict(issue: Issue) -> dict[str, object]:
+    after_text = issue.after
+    if issue.rule_key in {"reference_272_type_format_mismatch", "reference_entry_format"}:
+        after_text = "著录内容不自动改写，请人工按模板修改。"
     return {
         "paragraph_index": issue.paragraph_index,
         "rule_key": issue.rule_key,
@@ -4125,7 +4197,7 @@ def issue_dict(issue: Issue) -> dict[str, object]:
         "page": issue.page,
         "current": issue.current,
         "expected": issue.expected,
-        "after": issue.after,
+        "after": after_text,
         "message": issue.message,
         "before_screenshot": issue.before_screenshot,
         "after_screenshot": issue.after_screenshot,
@@ -4154,6 +4226,54 @@ def write_html_report(report: dict[str, object], path: Path) -> None:
             "<h2>问题分类汇总</h2>"
             "<table class='summary-table'><thead><tr><th>类别</th><th>数量</th></tr></thead>"
             f"<tbody>{rows_summary}</tbody></table>"
+        )
+    ref272_summary = report.get("reference_272_check_summary") or {}
+    ref272_html = ""
+    if isinstance(ref272_summary, dict):
+        bad_rows = []
+        for entry in ref272_summary.get("entries", []):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("status") == "matched":
+                continue
+            missing = entry.get("missing_fields") or []
+            missing_text = "、".join(str(x) for x in missing) if isinstance(missing, list) else str(missing)
+            template = str(entry.get("matched_template") or "请按对应文献类型模板补全字段")
+            bad_rows.append(
+                "<tr>"
+                f"<td>{html.escape(str(entry.get('visual_index', entry.get('index', ''))))}</td>"
+                f"<td>{html.escape(str(entry.get('detected_type', '')))}</td>"
+                f"<td>{html.escape(str(entry.get('text_excerpt', '')))}</td>"
+                f"<td>{html.escape(missing_text)}</td>"
+                f"<td>{html.escape(template)}</td>"
+                "</tr>"
+            )
+        ref272_html = (
+            "<h2>参考文献著录格式检查汇总（2.7.2）</h2>"
+            "<table class='summary-table'><tbody>"
+            f"<tr><td>total_entries</td><td>{html.escape(str(ref272_summary.get('total_entries', 0)))}</td></tr>"
+            f"<tr><td>matched_entries</td><td>{html.escape(str(ref272_summary.get('matched_entries', 0)))}</td></tr>"
+            f"<tr><td>type_mismatch_entries</td><td>{html.escape(str(ref272_summary.get('type_mismatch_entries', 0)))}</td></tr>"
+            f"<tr><td>unmatched_entries</td><td>{html.escape(str(ref272_summary.get('unmatched_entries', 0)))}</td></tr>"
+            "</tbody></table>"
+        )
+        if bad_rows:
+            ref272_html += (
+                "<table class='summary-table'><thead><tr><th>序号</th><th>类型</th><th>原文摘要</th><th>缺失字段</th><th>建议模板</th></tr></thead>"
+                f"<tbody>{''.join(bad_rows)}</tbody></table>"
+            )
+    ref273_summary = report.get("reference_273_check_summary") or {}
+    ref273_html = ""
+    if isinstance(ref273_summary, dict):
+        ref273_html = (
+            "<h2>2.7.3 补充规则检查</h2>"
+            "<table class='summary-table'><tbody>"
+            f"<tr><td>online_entries</td><td>{html.escape(str(ref273_summary.get('online_entries', 0)))}</td></tr>"
+            f"<tr><td>author_et_al_review_entries</td><td>{html.escape(str(ref273_summary.get('author_et_al_review_entries', 0)))}</td></tr>"
+            f"<tr><td>citation_date_missing_entries</td><td>{html.escape(str(ref273_summary.get('citation_date_missing_entries', 0)))}</td></tr>"
+            f"<tr><td>access_path_missing_entries</td><td>{html.escape(str(ref273_summary.get('access_path_missing_entries', 0)))}</td></tr>"
+            f"<tr><td>doi_or_url_missing_entries</td><td>{html.escape(str(ref273_summary.get('doi_or_url_missing_entries', 0)))}</td></tr>"
+            "</tbody></table>"
         )
     render_qa = report.get("render_qa")
     qa_html = ""
@@ -4283,6 +4403,8 @@ code {{ background: #f3f4f6; padding: 1px 4px; }}
 <p><strong>截图状态：</strong>{html.escape(str(report.get("screenshot_status", "")))}</p>
 </div>
 {category_html}
+{ref272_html}
+{ref273_html}
 {structure_html}
 {toc_manual_review_html}
 {toc_new_page_review_html}
@@ -4402,6 +4524,7 @@ def run(
         source_regions = structure_analysis["regions"]
         ref_entries_for_summary, _ref_entry_issues = _reference_entries_from_regions(normalized_doc.paragraphs, source_texts, source_regions)
         reference_272_check_summary = _reference_272_check_summary(ref_entries_for_summary)
+        reference_273_check_summary = _reference_273_check_summary(ref_entries_for_summary)
         issues = collect_issues(normalized_doc)
         create_annotated_docx(temp_path, comments_path, issues)
 
@@ -4520,6 +4643,7 @@ def run(
         "render_qa": render_qa,
         "structure_analysis": structure_analysis,
         "reference_272_check_summary": reference_272_check_summary,
+        "reference_273_check_summary": reference_273_check_summary,
         "layout_fix_policy": {
             "toc_page_numbering": "report_only",
             "toc_start_new_page": "report_only",

@@ -101,7 +101,7 @@ def test_reference_272_valid_ebol():
 def test_reference_272_invalid_ebol_missing_citation_date():
     mod = load_module()
     _issues, keys = _collect_reference_keys(mod, ["[1] 作者. 题名[EB/OL]. https://example.com."])
-    assert "reference_273_online_access_missing" in keys or "reference_272_type_format_mismatch" in keys
+    assert "reference_273_citation_date_missing" in keys or "reference_272_type_format_mismatch" in keys
 
 
 def test_reference_272_no_match():
@@ -145,13 +145,51 @@ def test_reference_272_valid_m_s_p_n():
 def test_reference_273_online_missing_for_journal_with_url():
     mod = load_module()
     _issues, keys = _collect_reference_keys(mod, ["[1] 作者. 题名[J]. 期刊名, 2020, 12(3): 15-20. https://example.com."])
-    assert "reference_273_online_access_missing" in keys
+    assert "reference_273_citation_date_missing" in keys
 
 
 def test_reference_273_author_et_al():
     mod = load_module()
     _issues, keys = _collect_reference_keys(mod, ["[1] 张三, 李四, 王五, 赵六. 题名[J]. 期刊名, 2020, 12(3): 15-20."])
-    assert "reference_273_author_et_al" in keys
+    assert "reference_273_author_et_al_review" in keys
+
+
+def test_reference_273_online_entry_missing_access_reports():
+    mod = load_module()
+    _issues, keys = _collect_reference_keys(mod, ["[1] 作者. 题名[EB/OL]. [2024-01-01]."])
+    assert "reference_273_online_access_missing" in keys
+
+
+def test_reference_273_no_online_entries_no_false_positive():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("参考文献")
+    doc.add_paragraph("[1] 作者. 题名[J]. 刊名, 2020, 1(2):3-5.")
+    texts = [mod.paragraph_text(p) for p in doc.paragraphs]
+    entries, _ = mod._reference_entries_from_regions(doc.paragraphs, texts, ["references", "references"])
+    summary = mod._reference_273_check_summary(entries)
+    assert summary["online_entries"] == 0
+    assert summary["access_path_missing_entries"] == 0
+    assert summary["citation_date_missing_entries"] == 0
+    assert summary["doi_or_url_missing_entries"] == 0
+
+
+def test_reference_273_summary_exists():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("参考文献")
+    doc.add_paragraph("[1] 作者. 题名[EB/OL]. (2020-01-01)[2024-01-01]. https://example.com.")
+    texts = [mod.paragraph_text(p) for p in doc.paragraphs]
+    entries, _ = mod._reference_entries_from_regions(doc.paragraphs, texts, ["references", "references"])
+    summary = mod._reference_273_check_summary(entries)
+    assert "online_entries" in summary
+    assert "entries" in summary
+
+
+def test_reference_273_author_et_al_review():
+    mod = load_module()
+    _issues, keys = _collect_reference_keys(mod, ["[1] 张三, 李四, 王五, 赵六. 题名[J]. 刊名, 2020, 12(3): 15-20."])
+    assert "reference_273_author_et_al_review" in keys
 
 
 def test_reference_checks_scope_only_references():
@@ -1085,6 +1123,63 @@ def test_report_paths_use_timestamped_names():
         assert "20260513_155821" in Path(payload["annotated_docx"]).name
         assert "20260513_155821" in Path(payload["json_report"]).name
         assert "20260513_155821" in Path(payload["html_report"]).name
+
+
+def test_html_includes_reference_272_summary():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "r.html"
+        report = {
+            "input": "x.docx",
+            "annotated_docx": "a.docx",
+            "fixed_docx": "f.docx",
+            "issue_count": 1,
+            "renderer_for_fixed": "ooxml",
+            "renderer_for_comments": "ooxml",
+            "screenshot_status": "skipped",
+            "issues": [],
+            "issue_summary_by_category": {},
+            "reference_272_check_summary": {
+                "total_entries": 2,
+                "matched_entries": 1,
+                "type_mismatch_entries": 1,
+                "unmatched_entries": 0,
+                "entries": [
+                    {"visual_index": 1, "status": "matched", "detected_type": "J", "text_excerpt": "ok", "missing_fields": [], "matched_template": "journal"},
+                    {"visual_index": 2, "status": "type_mismatch", "detected_type": "M", "text_excerpt": "bad", "missing_fields": ["出版地"], "matched_template": "book"},
+                ],
+            },
+            "reference_273_check_summary": {
+                "online_entries": 0,
+                "author_et_al_review_entries": 0,
+                "citation_date_missing_entries": 0,
+                "access_path_missing_entries": 0,
+                "doi_or_url_missing_entries": 0,
+                "entries": [],
+            },
+        }
+        mod.write_html_report(report, p)
+        html = p.read_text(encoding="utf-8")
+        assert "参考文献著录格式检查汇总（2.7.2）" in html
+        assert "type_mismatch_entries" in html
+        assert "bad" in html
+
+
+def test_reference_272_semantic_issue_after_text_says_manual_edit():
+    mod = load_module()
+    issue = mod.Issue(
+        paragraph_index=3,
+        rule_key="reference_272_type_format_mismatch",
+        text_type="reference entry 2.7.2 type format",
+        text_excerpt="[1] 作者. 题名[M]. 出版社, 2020.",
+        current="缺失要素：出版地",
+        expected="应符合2.7.2模板",
+        message="",
+        category="references",
+        after="格式已修复",
+    )
+    payload = mod.issue_dict(issue)
+    assert payload["after"] == "著录内容不自动改写，请人工按模板修改。"
 
 
 def test_repeated_runs_do_not_overwrite_previous_outputs():
