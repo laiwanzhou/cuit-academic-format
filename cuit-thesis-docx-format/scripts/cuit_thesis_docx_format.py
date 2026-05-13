@@ -2098,7 +2098,7 @@ def apply_page_setup(document: Document, allow_layout_fixes: bool) -> None:
             section.header_distance = Cm(1.5)
     if allow_layout_fixes:
         apply_cuit_page_headers(document, allow_layout_fixes=allow_layout_fixes)
-        ensure_toc_starts_new_page(document)
+        # TOC new-page handling is report-only to avoid page-break regressions on hidden TOC placeholders.
 
 
 def _section_format(section) -> str:
@@ -2553,37 +2553,19 @@ def collect_toc_issues(document: Document) -> list[Issue]:
             )
     if has_toc_title or has_toc_field:
         toc_idx = find_toc_start_paragraph_index(document)
-        if toc_idx is not None:
-            toc_paragraph = document.paragraphs[toc_idx]
-            prev_has_page_break = toc_idx > 0 and _paragraph_has_page_break_node(document.paragraphs[toc_idx - 1])
-            if toc_paragraph.paragraph_format.page_break_before is not True and not prev_has_page_break:
-                issues.append(
-                    Issue(
-                        paragraph_index=toc_idx,
-                        rule_key="toc_should_start_new_page",
-                        text_type="目录起始分页",
-                        text_excerpt=paragraph_text(toc_paragraph)[:160],
-                        current="目录标题与上一模块内容位于同一页或未检测到目录前分页。",
-                        expected="目录应另起一页。",
-                        message="已将目录标题设置为段前分页，使目录另起一页。",
-                        category="toc",
-                        location=f"paragraph {toc_idx}",
-                    )
-                )
-        else:
-            issues.append(
-                Issue(
-                    paragraph_index=-1,
-                    rule_key="toc_start_not_found_manual_review",
-                    text_type="目录起始定位",
-                    text_excerpt="TOC start",
-                    current="未能可靠定位目录标题或 TOC 起始段。",
-                    expected="目录应另起一页。",
-                    message="未能可靠定位目录标题或 TOC 起始段，无法自动设置目录另起页，请人工检查。",
-                    category="toc",
-                    location="document TOC",
-                )
+        issues.append(
+            Issue(
+                paragraph_index=toc_idx if toc_idx is not None else -1,
+                rule_key="toc_start_new_page_manual_review",
+                text_type="目录另起页人工复核",
+                text_excerpt=(paragraph_text(document.paragraphs[toc_idx])[:160] if toc_idx is not None else "TOC start"),
+                current="检测到目录/TOC 自动目录，工具不自动设置段前分页。",
+                expected="目录应另起一页。",
+                message="目录为 Word/WPS 自动目录或 TOC 域时，自动设置 page_break_before 可能作用到隐藏 TOC 占位段并生成空白页。本工具仅提示，请人工在 Word/WPS 中确认目录标题“目 录”另起一页。",
+                category="toc",
+                location=f"paragraph {toc_idx}" if toc_idx is not None else "document TOC",
             )
+        )
     return issues
 
 
@@ -4229,6 +4211,19 @@ def write_html_report(report: dict[str, object], path: Path) -> None:
             "</ol>"
             "</section>"
         )
+    toc_new_page_review_html = ""
+    if isinstance(layout_fix_policy, dict) and layout_fix_policy.get("toc_start_new_page") == "report_only":
+        toc_new_page_review_html = (
+            "<section class='structure'>"
+            "<h2>目录另起页人工复核说明</h2>"
+            "<ol>"
+            "<li>目录应另起一页。</li>"
+            "<li>如果目录与英文摘要 Key words 在同一页，请在 Word/WPS 中将目录标题“目 录”设置为段前分页，或在其前插入分页符。</li>"
+            "<li>如果目录是自动目录/TOC 域，不建议工具自动设置 page_break_before，因为可能作用到隐藏 TOC 占位段并生成空白页。</li>"
+            "<li>工具不会自动插入分页符、分节符或修改 TOC 域。</li>"
+            "</ol>"
+            "</section>"
+        )
     rows = []
     for n, issue_obj in enumerate(issues, start=1):
         issue = issue_obj if isinstance(issue_obj, dict) else {}
@@ -4290,6 +4285,7 @@ code {{ background: #f3f4f6; padding: 1px 4px; }}
 {category_html}
 {structure_html}
 {toc_manual_review_html}
+{toc_new_page_review_html}
 {qa_html}
 {''.join(rows)}
 </body>
@@ -4526,6 +4522,7 @@ def run(
         "reference_272_check_summary": reference_272_check_summary,
         "layout_fix_policy": {
             "toc_page_numbering": "report_only",
+            "toc_start_new_page": "report_only",
             "reason": "自动目录 TOC 域、section break、页脚 PAGE 域与 Word/WPS 字段刷新高度耦合；自动修改曾造成空白页回归，因此当前仅报告并提示人工复核。",
         },
         "structure_warnings": structure_analysis.get("warnings", []) + compute_section_boundary_findings(source_texts, structure_analysis["regions"])[0] + compute_section_boundary_findings(source_texts, structure_analysis["regions"])[1],

@@ -1175,45 +1175,23 @@ def test_toc_report_only_does_not_touch_reference_summary():
     assert summary["entries"][0]["numbering_source"] == "text"
 
 
-def test_toc_title_gets_page_break_before():
+def test_toc_start_new_page_is_report_only():
     mod = load_module()
     doc = mod.Document()
-    doc.add_paragraph("ABSTRACT")
     doc.add_paragraph("Key words: a; b; c")
     toc = doc.add_paragraph("目 录")
-    doc.add_paragraph("1 引 言")
-    changed = mod.ensure_toc_starts_new_page(doc)
-    assert changed is True
-    assert toc.paragraph_format.page_break_before is True
-
-
-def test_toc_start_new_page_does_not_create_section():
-    mod = load_module()
-    doc = mod.Document()
-    doc.add_paragraph("Key words: a; b; c")
-    doc.add_paragraph("目 录")
     before_sections = len(doc.sections)
     before_pgnum = [sec._sectPr.find(mod.qn("w:pgNumType")) is not None for sec in doc.sections]
-    mod.ensure_toc_starts_new_page(doc)
-    after_pgnum = [sec._sectPr.find(mod.qn("w:pgNumType")) is not None for sec in doc.sections]
+    issues = mod.collect_toc_issues(doc)
+    keys = {i.rule_key for i in issues}
+    assert toc.paragraph_format.page_break_before is not True
+    assert "toc_start_new_page_manual_review" in keys
     assert len(doc.sections) == before_sections
+    after_pgnum = [sec._sectPr.find(mod.qn("w:pgNumType")) is not None for sec in doc.sections]
     assert before_pgnum == after_pgnum
 
 
-def test_toc_start_new_page_idempotent():
-    mod = load_module()
-    doc = mod.Document()
-    doc.add_paragraph("Key words: a; b; c")
-    toc = doc.add_paragraph("目 录")
-    before_count = len(doc.paragraphs)
-    mod.ensure_toc_starts_new_page(doc)
-    mod.ensure_toc_starts_new_page(doc)
-    assert toc.paragraph_format.page_break_before is True
-    assert len(doc.sections) == 1
-    assert len(doc.paragraphs) == before_count
-
-
-def test_toc_field_start_gets_page_break_before():
+def test_no_page_break_before_added_to_toc_field():
     mod = load_module()
     doc = mod.Document()
     p = doc.add_paragraph("")
@@ -1221,9 +1199,28 @@ def test_toc_field_start_gets_page_break_before():
     instr = mod.OxmlElement("w:instrText")
     instr.text = ' TOC \\o "1-3" \\h \\z \\u '
     r.append(instr)
-    changed = mod.ensure_toc_starts_new_page(doc)
-    assert changed is True
-    assert p.paragraph_format.page_break_before is True
+    _issues = mod.collect_toc_issues(doc)
+    assert p.paragraph_format.page_break_before is not True
+
+
+def test_toc_report_only_does_not_create_blank_page():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("Key words: x")
+    toc_holder = doc.add_paragraph("")
+    run = toc_holder._p.add_r()
+    instr = mod.OxmlElement("w:instrText")
+    instr.text = ' TOC \\o "1-3" \\h \\z \\u '
+    run.append(instr)
+    doc.add_paragraph("目 录")
+    intro = doc.add_paragraph("1 引 言")
+    before_sections = len(doc.sections)
+    issues = mod.collect_toc_issues(doc)
+    keys = {i.rule_key for i in issues}
+    assert toc_holder.paragraph_format.page_break_before is not True
+    assert intro.paragraph_format.page_break_before is not True
+    assert len(doc.sections) == before_sections
+    assert "toc_start_new_page_manual_review" in keys
 
 
 def test_toc_page_number_still_report_only():
@@ -1283,45 +1280,13 @@ def test_keywords_to_toc_no_blank_page():
     doc.add_paragraph("论文总页数：32页")
     intro = doc.add_paragraph("1 引 言")
     before_sections = len(doc.sections)
-    mod.ensure_toc_starts_new_page(doc)
+    _issues = mod.collect_toc_issues(doc)
     texts = [mod.paragraph_text(p).strip() for p in doc.paragraphs]
     assert "Key words: x" in texts
     assert "目 录" in texts
-    assert toc.paragraph_format.page_break_before is True
+    assert toc.paragraph_format.page_break_before is not True
     assert len(doc.sections) == before_sections
     assert intro.paragraph_format.page_break_before is not True
-
-
-def test_ensure_toc_starts_new_page_removes_prior_safe_blank_break():
-    mod = load_module()
-    doc = mod.Document()
-    doc.add_paragraph("Key words: x")
-    blank = doc.add_paragraph("")
-    br_run = blank._p.add_r()
-    br = mod.OxmlElement("w:br")
-    br.set(mod.qn("w:type"), "page")
-    br_run.append(br)
-    toc = doc.add_paragraph("目 录")
-    before = len(doc.paragraphs)
-    before_sections = len(doc.sections)
-    changed = mod.ensure_toc_starts_new_page(doc)
-    assert changed is True
-    assert toc.paragraph_format.page_break_before is True
-    assert len(doc.paragraphs) == before - 1
-    assert len(doc.sections) == before_sections
-
-
-def test_ensure_toc_starts_new_page_does_not_delete_sectpr_blank():
-    mod = load_module()
-    doc = mod.Document()
-    doc.add_paragraph("Key words: x")
-    blank = doc.add_paragraph("")
-    blank._p.get_or_add_pPr().append(mod.OxmlElement("w:sectPr"))
-    doc.add_paragraph("目 录")
-    before = len(doc.paragraphs)
-    mod.ensure_toc_starts_new_page(doc)
-    assert len(doc.paragraphs) == before
-
 
 def test_find_toc_start_ignores_empty_toc_style_without_field():
     mod = load_module()
