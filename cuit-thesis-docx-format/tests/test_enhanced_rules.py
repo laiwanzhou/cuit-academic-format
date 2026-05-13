@@ -1,4 +1,7 @@
 import importlib.util
+import json
+import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -1028,3 +1031,144 @@ def test_keywords_boundary_blank_removed_without_crossing_body():
     t = texts.index("目 录")
     assert t == k + 1
     assert intro.paragraph_format.page_break_before is not True
+
+
+def _prepare_run_stub(mod):
+    mod.require_docx_dependencies = lambda: None
+    mod.normalize_document_structure = lambda doc: None
+    mod.collect_issues = lambda doc: []
+    mod.create_annotated_docx = lambda src, out, issues: shutil.copyfile(src, out)
+    mod.probe_com_renderer = lambda renderer: "ooxml"
+    mod.apply_supported_rules = lambda doc, allow_layout_fixes: None
+    mod.try_com_save = lambda path, renderer: "ooxml"
+    mod.cleanup_visible_blank_paragraphs_after_layout = lambda doc: ([], False)
+    mod.attach_after_formats = lambda fixed_path, issues: None
+    mod.attach_screenshots = lambda **kwargs: ("skipped", {})
+    mod.count_document_images = lambda doc: 0
+    mod.count_figure_captions = lambda doc: 0
+
+
+def _make_minimal_docx(mod, path: Path) -> None:
+    doc = mod.Document()
+    doc.add_paragraph("摘 要")
+    doc.add_paragraph("正文段落")
+    doc.save(str(path))
+
+
+def test_output_files_include_same_run_timestamp():
+    mod = load_module()
+    _prepare_run_stub(mod)
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src = root / "sample.docx"
+        out = root / "out"
+        _make_minimal_docx(mod, src)
+        report = mod.run(src, out, "auto", "never", run_timestamp="20260513_155821")
+        for key in ["annotated_docx", "fixed_docx", "json_report", "html_report"]:
+            assert "20260513_155821" in Path(report[key]).name
+        assert report["run_timestamp"] == "20260513_155821"
+
+
+def test_report_paths_use_timestamped_names():
+    mod = load_module()
+    _prepare_run_stub(mod)
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src = root / "sample.docx"
+        out = root / "out"
+        _make_minimal_docx(mod, src)
+        report = mod.run(src, out, "auto", "never", run_timestamp="20260513_155821")
+        payload = json.loads(Path(report["json_report"]).read_text(encoding="utf-8"))
+        assert payload["run_timestamp"] == "20260513_155821"
+        assert "20260513_155821" in Path(payload["fixed_docx"]).name
+        assert "20260513_155821" in Path(payload["annotated_docx"]).name
+        assert "20260513_155821" in Path(payload["json_report"]).name
+        assert "20260513_155821" in Path(payload["html_report"]).name
+
+
+def test_repeated_runs_do_not_overwrite_previous_outputs():
+    mod = load_module()
+    _prepare_run_stub(mod)
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src = root / "sample.docx"
+        out = root / "out"
+        _make_minimal_docx(mod, src)
+        report1 = mod.run(src, out, "auto", "never", run_timestamp="20260513_155821")
+        report2 = mod.run(src, out, "auto", "never", run_timestamp="20260513_155822")
+        assert Path(report1["fixed_docx"]).exists()
+        assert Path(report2["fixed_docx"]).exists()
+        assert report1["fixed_docx"] != report2["fixed_docx"]
+
+
+def test_timestamp_format():
+    mod = load_module()
+    ts = mod.build_run_timestamp()
+    assert re.fullmatch(r"\d{8}_\d{6}", ts)
+
+
+def test_run_timestamp_cli_argument():
+    mod = load_module()
+    _prepare_run_stub(mod)
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src = root / "sample.docx"
+        out = root / "out"
+        _make_minimal_docx(mod, src)
+        report = mod.run(src, out, "auto", "never", run_timestamp="20260513_155821")
+        assert report["run_timestamp"] == "20260513_155821"
+        assert Path(report["fixed_docx"]).name.endswith("_20260513_155821.docx")
+
+
+def test_toc_page_number_manual_review_issue():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("目 录")
+    doc.add_paragraph("1 引 言 .... 1")
+    issues = mod.detect_toc_manual_review_issues(doc)
+    keys = {issue.rule_key for issue in issues}
+    assert "toc_page_number_manual_review" in keys
+
+
+def test_toc_body_section_manual_review_issue():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("目 录")
+    doc.add_paragraph("1 引 言")
+    doc.add_paragraph("随着 COVID-19 疫情...")
+    issues = mod.detect_toc_manual_review_issues(doc)
+    keys = {issue.rule_key for issue in issues}
+    assert "toc_page_number_manual_review" in keys
+    assert "toc_body_section_manual_review" in keys
+
+
+def test_toc_report_only_does_not_modify_sections():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("目 录")
+    doc.add_paragraph("1 引 言")
+    before_sections = len(doc.sections)
+    before_xml = doc.element.xml
+    _issues = mod.detect_toc_manual_review_issues(doc)
+    assert len(doc.sections) == before_sections
+    assert doc.element.xml == before_xml
+
+
+def test_toc_entry_page_numbers_remain_decimal_text():
+    mod = load_module()
+    doc = mod.Document()
+    p = doc.add_paragraph("1 引 言 .... 1")
+    _issues = mod.detect_toc_manual_review_issues(doc)
+    assert p.text.endswith("1")
+
+
+def test_toc_report_only_does_not_touch_reference_summary():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("参考文献")
+    doc.add_paragraph("[1] 张三. 题名[J]. 刊名, 2020, 1(2):3-5.")
+    texts = [mod.paragraph_text(x) for x in doc.paragraphs]
+    entries, _ = mod._reference_entries_from_regions(doc.paragraphs, texts, ["references", "references"])
+    summary = mod._reference_272_check_summary(entries)
+    assert summary["entries"][0]["visual_index"] == 1
+    assert summary["entries"][0]["numbering_source"] == "text"

@@ -2093,11 +2093,7 @@ def apply_page_setup(document: Document, allow_layout_fixes: bool) -> None:
         if allow_layout_fixes:
             section.header_distance = Cm(1.5)
     if allow_layout_fixes:
-        # Ensure front-matter and body do not share one physical section,
-        # otherwise page-number formats can bleed across module boundaries.
-        ensure_body_starts_new_page_number_section(document)
         apply_cuit_page_headers(document, allow_layout_fixes=allow_layout_fixes)
-        apply_page_number_formats(document)
 
 
 def _section_format(section) -> str:
@@ -3305,6 +3301,7 @@ def collect_issues(document: Document) -> list[Issue]:
     issues.extend(collect_section_issues(document))
     issues.extend(collect_abstract_title_issues(document))
     issues.extend(collect_toc_issues(document))
+    issues.extend(detect_toc_manual_review_issues(document))
     issues.extend(collect_table_issues(document))
     issues.extend(collect_reference_issues(document))
     issues.extend(collect_image_size_issues(document))
@@ -4115,6 +4112,22 @@ def write_html_report(report: dict[str, object], path: Path) -> None:
         structure_html = f"<section class='structure'><h2>组成部分提醒</h2><ul>{warning_items}</ul></section>"
     else:
         structure_html = ""
+    layout_fix_policy = report.get("layout_fix_policy") or {}
+    toc_manual_review_html = ""
+    if isinstance(layout_fix_policy, dict) and layout_fix_policy.get("toc_page_numbering") == "report_only":
+        toc_manual_review_html = (
+            "<section class='structure'>"
+            "<h2>目录页码人工复核说明</h2>"
+            "<ol>"
+            "<li>目录是 Word/WPS 自动目录或 TOC 域时，页码格式不应由工具自动改。</li>"
+            "<li>目录条目右侧页码应保持阿拉伯数字。</li>"
+            "<li>目录页底部页码属于前置部分，应为小写罗马数字。</li>"
+            "<li>请人工检查目录所在节的页码格式。</li>"
+            "<li>请人工检查正文第一章所在节是否从阿拉伯数字 1 开始。</li>"
+            "<li>工具不会自动插入/移动分节符，以避免再次生成空白页。</li>"
+            "</ol>"
+            "</section>"
+        )
     rows = []
     for n, issue_obj in enumerate(issues, start=1):
         issue = issue_obj if isinstance(issue_obj, dict) else {}
@@ -4175,6 +4188,7 @@ code {{ background: #f3f4f6; padding: 1px 4px; }}
 </div>
 {category_html}
 {structure_html}
+{toc_manual_review_html}
 {qa_html}
 {''.join(rows)}
 </body>
@@ -4187,12 +4201,82 @@ def stdout_json(report: dict[str, object]) -> str:
     return json.dumps(report, ensure_ascii=True, indent=2)
 
 
+def build_run_timestamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def append_timestamp_to_name(path: Path, run_timestamp: str) -> Path:
+    return path.with_name(f"{path.stem}_{run_timestamp}{path.suffix}")
+
+
+def _has_toc_title(document: Document) -> bool:
+    return any(re.sub(r"\s+", "", paragraph_text(p)) in {"目录", "目次"} for p in document.paragraphs)
+
+
+def detect_toc_field_report_only(document: Document) -> bool:
+    body = document.element.body
+    for node in body.iter():
+        if node.tag == qn("w:instrText") and "TOC" in (node.text or "").upper():
+            return True
+        if node.tag == qn("w:fldSimple") and "TOC" in (node.get(qn("w:instr")) or "").upper():
+            return True
+    return False
+
+
+def detect_toc_manual_review_issues(document: Document) -> list[Issue]:
+    issues: list[Issue] = []
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    has_toc = _has_toc_title(document) or detect_toc_field_report_only(document)
+    if not has_toc:
+        return issues
+
+    issues.append(
+        Issue(
+            paragraph_index=-1,
+            rule_key="toc_page_number_manual_review",
+            text_type="目录页码人工复核",
+            text_excerpt="目录/TOC",
+            current="检测到目录/TOC 自动目录。由于目录页页码涉及 section、页脚 PAGE 域和 TOC 字段刷新，工具不自动修改。",
+            expected="目录所在前置页页脚页码应为小写罗马数字 i, ii, iii...；正文从第 1 页开始使用阿拉伯数字或“第*页 共*页”。",
+            message=(
+                "请人工在 Word/WPS 中复核目录页页脚页码。若目录页底部显示 3、4 等阿拉伯数字，应将目录所在节页码格式设置为小写罗马数字；"
+                "正文第一章所在节应设置为阿拉伯数字并从 1 开始。不要修改目录条目右侧的正文页码。"
+            ),
+            category="page",
+            location="document TOC",
+        )
+    )
+
+    first_toc_idx = next((idx for idx, region in enumerate(regions) if region == "toc"), None)
+    first_body_idx = next((idx for idx, region in enumerate(regions) if region == "body"), None)
+    if first_toc_idx is not None and first_body_idx is not None and first_body_idx > first_toc_idx:
+        gap_texts = [texts[idx].strip() for idx in range(first_toc_idx, first_body_idx) if texts[idx].strip()]
+        has_explicit_section_mark = any("分节符" in text for text in gap_texts)
+        if not has_explicit_section_mark:
+            issues.append(
+                Issue(
+                    paragraph_index=first_body_idx,
+                    rule_key="toc_body_section_manual_review",
+                    text_type="目录与正文分节人工复核",
+                    text_excerpt=(texts[first_body_idx] or "正文起始段落")[:160],
+                    current="工具检测到目录/TOC 与正文边界可能需要人工确认。",
+                    expected="目录结束后、正文第一章前应有正确分节边界；前置部分使用小写罗马数字，正文部分从阿拉伯数字 1 开始。",
+                    message="请在 Word/WPS 中显示编辑标记，检查目录结束后、正文第一章前是否有“下一页分节符”。本工具不自动插入或移动分节符，以避免产生空白页。",
+                    category="page",
+                    location="toc to body boundary",
+                )
+            )
+    return issues
+
+
 def run(
     input_path: Path,
     output_dir: Path,
     renderer: str,
     screenshots: str,
     allow_ooxml_layout_fixes: bool = False,
+    run_timestamp: str | None = None,
 ) -> dict[str, object]:
     require_docx_dependencies()
     if not input_path.exists():
@@ -4201,10 +4285,11 @@ def run(
         raise ValueError("Input must be a .docx file.")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    comments_path = output_dir / f"{input_path.stem}_format_comments.docx"
-    fixed_path = output_dir / f"{input_path.stem}_format_fixed.docx"
-    report_path = output_dir / f"{input_path.stem}_format_report.json"
-    html_report_path = output_dir / f"{input_path.stem}_format_report.html"
+    run_timestamp = run_timestamp or build_run_timestamp()
+    comments_path = append_timestamp_to_name(output_dir / f"{input_path.stem}_format_comments.docx", run_timestamp)
+    fixed_path = append_timestamp_to_name(output_dir / f"{input_path.stem}_format_fixed.docx", run_timestamp)
+    report_path = append_timestamp_to_name(output_dir / f"{input_path.stem}_format_report.json", run_timestamp)
+    html_report_path = append_timestamp_to_name(output_dir / f"{input_path.stem}_format_report.html", run_timestamp)
 
     source_doc = Document(str(input_path))
     source_image_count = count_document_images(source_doc)
@@ -4312,6 +4397,7 @@ def run(
 
     report = {
         "input": str(input_path.resolve()),
+        "run_timestamp": run_timestamp,
         "annotated_docx": str(comments_path.resolve()),
         "fixed_docx": str(fixed_path.resolve()),
         "json_report": str(report_path.resolve()),
@@ -4337,6 +4423,10 @@ def run(
         "render_qa": render_qa,
         "structure_analysis": structure_analysis,
         "reference_272_check_summary": reference_272_check_summary,
+        "layout_fix_policy": {
+            "toc_page_numbering": "report_only",
+            "reason": "自动目录 TOC 域、section break、页脚 PAGE 域与 Word/WPS 字段刷新高度耦合；自动修改曾造成空白页回归，因此当前仅报告并提示人工复核。",
+        },
         "structure_warnings": structure_analysis.get("warnings", []) + compute_section_boundary_findings(source_texts, structure_analysis["regions"])[0] + compute_section_boundary_findings(source_texts, structure_analysis["regions"])[1],
         "issues": [issue_dict(issue) for issue in issues],
         "unsupported_or_advisory": advisory,
@@ -4365,6 +4455,7 @@ def main() -> int:
             "(headers, footers, page numbers, header/footer distance, and section behavior)."
         ),
     )
+    parser.add_argument("--run-timestamp", default=None, help="Optional fixed run timestamp, e.g. 20260513_155821")
     args = parser.parse_args()
     report = run(
         Path(args.docx),
@@ -4372,6 +4463,7 @@ def main() -> int:
         args.renderer,
         args.screenshots,
         allow_ooxml_layout_fixes=args.allow_ooxml_layout_fixes,
+        run_timestamp=args.run_timestamp,
     )
     print(stdout_json(report))
     return 0
