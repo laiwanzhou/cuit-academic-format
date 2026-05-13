@@ -2629,6 +2629,216 @@ def _reference_type_marker(text: str) -> str | None:
     return marker_match.group(1) if marker_match else None
 
 
+def _reference_text_number(text: str) -> int | None:
+    match = _reference_entry_start_match(text)
+    if not match:
+        return None
+    value = match.group(1) or match.group(2)
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _numpr_val(num_pr, child_tag: str) -> str | None:
+    child = num_pr.find(qn(child_tag))
+    if child is None:
+        return None
+    return child.get(qn("w:val"))
+
+
+def get_paragraph_numbering(paragraph) -> dict[str, object] | None:
+    ppr = paragraph._p.pPr
+    num_pr = None
+    if ppr is not None:
+        num_pr = ppr.find(qn("w:numPr"))
+    if num_pr is None:
+        style = getattr(paragraph, "style", None)
+        style_elem = getattr(style, "_element", None)
+        if style_elem is not None:
+            style_ppr = style_elem.find(qn("w:pPr"))
+            if style_ppr is not None:
+                num_pr = style_ppr.find(qn("w:numPr"))
+    if num_pr is None:
+        return None
+    num_id = _numpr_val(num_pr, "w:numId")
+    ilvl = _numpr_val(num_pr, "w:ilvl") or "0"
+    info: dict[str, object] = {
+        "num_id": num_id,
+        "ilvl": ilvl,
+        "num_fmt": None,
+        "lvl_text": None,
+        "start": None,
+    }
+    numbering_part = getattr(paragraph.part, "numbering_part", None)
+    if numbering_part is None or num_id is None:
+        return info
+    numbering = getattr(numbering_part, "_element", None)
+    if numbering is None:
+        return info
+
+    num_elem = None
+    for elem in numbering.findall(qn("w:num")):
+        if elem.get(qn("w:numId")) == str(num_id):
+            num_elem = elem
+            break
+    if num_elem is None:
+        return info
+
+    abstract_num_id = None
+    abstract_node = num_elem.find(qn("w:abstractNumId"))
+    if abstract_node is not None:
+        abstract_num_id = abstract_node.get(qn("w:val"))
+
+    lvl_elem = None
+    override_level = None
+    for lvl_override in num_elem.findall(qn("w:lvlOverride")):
+        if lvl_override.get(qn("w:ilvl")) != str(ilvl):
+            continue
+        start_override = lvl_override.find(qn("w:startOverride"))
+        if start_override is not None:
+            try:
+                override_level = int(start_override.get(qn("w:val")))
+            except Exception:
+                override_level = None
+        lvl_elem = lvl_override.find(qn("w:lvl"))
+        if lvl_elem is not None:
+            break
+
+    if lvl_elem is None and abstract_num_id is not None:
+        abstract_elem = None
+        for elem in numbering.findall(qn("w:abstractNum")):
+            if elem.get(qn("w:abstractNumId")) == str(abstract_num_id):
+                abstract_elem = elem
+                break
+        if abstract_elem is not None:
+            for lvl in abstract_elem.findall(qn("w:lvl")):
+                if lvl.get(qn("w:ilvl")) == str(ilvl):
+                    lvl_elem = lvl
+                    break
+
+    if lvl_elem is None:
+        return info
+
+    num_fmt = lvl_elem.find(qn("w:numFmt"))
+    lvl_text = lvl_elem.find(qn("w:lvlText"))
+    start = lvl_elem.find(qn("w:start"))
+    info["num_fmt"] = num_fmt.get(qn("w:val")) if num_fmt is not None else None
+    info["lvl_text"] = lvl_text.get(qn("w:val")) if lvl_text is not None else None
+    if override_level is not None:
+        info["start"] = override_level
+    elif start is not None:
+        try:
+            info["start"] = int(start.get(qn("w:val")))
+        except Exception:
+            info["start"] = None
+    return info
+
+
+def has_word_auto_numbering(paragraph) -> bool:
+    info = get_paragraph_numbering(paragraph)
+    if not info:
+        return False
+    num_fmt = str(info.get("num_fmt") or "").lower()
+    if num_fmt in {"", "bullet", "none"}:
+        return False
+    lvl_text = str(info.get("lvl_text") or "")
+    return bool(re.search(r"%\d+", lvl_text))
+
+
+def get_reference_visual_index(
+    paragraph,
+    fallback_index: int,
+    numbering_counters: dict[tuple[str, str], int],
+) -> tuple[int, str]:
+    text_no = _reference_text_number(paragraph_text(paragraph))
+    if text_no is not None:
+        return text_no, "text"
+    if has_word_auto_numbering(paragraph):
+        info = get_paragraph_numbering(paragraph) or {}
+        key = (str(info.get("num_id") or ""), str(info.get("ilvl") or "0"))
+        if key not in numbering_counters:
+            start = info.get("start")
+            try:
+                numbering_counters[key] = int(start) - 1 if start is not None else 0
+            except Exception:
+                numbering_counters[key] = 0
+        numbering_counters[key] += 1
+        return numbering_counters[key], "word_auto_numbering"
+    return fallback_index, "inferred"
+
+
+def _clean_ref_field(value: str) -> str:
+    return value.strip(" \t\r\n.,;:，；：")
+
+
+def parse_reference_entry(text: str) -> dict[str, str]:
+    marker = _reference_type_marker(text) or ""
+    marker_match = re.search(r"\[\s*[A-Z]+(?:/[A-Z]+)?\s*\]", text)
+    before_marker = text[: marker_match.start()] if marker_match else text
+    after_marker = text[marker_match.end() :] if marker_match else ""
+
+    before_marker = _clean_ref_field(before_marker)
+    after_marker = _clean_ref_field(after_marker)
+    parts = before_marker.split(".", 1)
+    authors = _clean_ref_field(parts[0]) if parts else ""
+    title = _clean_ref_field(parts[1]) if len(parts) > 1 else ""
+    if not title and marker_match:
+        title = _clean_ref_field(before_marker)
+
+    source_title = ""
+    year = ""
+    tail_after_year = ""
+    patent_no = ""
+    url = ""
+    doi = ""
+    publisher = ""
+    place = ""
+
+    year_match = re.search(r"(19|20)\d{2}", after_marker)
+    if year_match:
+        year = year_match.group(0)
+        source_title = _clean_ref_field(after_marker[: year_match.start()])
+        tail_after_year = _clean_ref_field(after_marker[year_match.end() :])
+    else:
+        source_title = _clean_ref_field(after_marker)
+
+    patent_match = re.search(r"\b(?:CN|US|EP|JP|WO)\s*[0-9A-Z.]+\b", text, re.I)
+    if patent_match:
+        patent_no = patent_match.group(0).replace(" ", "")
+
+    path_match = re.search(r"(https?://\S+|www\.\S+)", text, re.I)
+    if path_match:
+        url = path_match.group(1).rstrip(".,;)")
+
+    doi_match = re.search(r"\bDOI\s*[:：]?\s*([^\s,;]+)|\bdoi\.org/\S+", text, re.I)
+    if doi_match:
+        doi = (doi_match.group(1) or doi_match.group(0)).rstrip(".,;)")
+
+    pub_match = re.search(r"(?:(?P<place>[^,:，：]+)\s*[:：]\s*)?(?P<publisher>[^,，]+)\s*[,，]\s*(?P<year>(?:19|20)\d{2})", after_marker)
+    if pub_match:
+        place = _clean_ref_field(pub_match.group("place") or "")
+        publisher = _clean_ref_field(pub_match.group("publisher") or "")
+        if not year:
+            year = pub_match.group("year")
+
+    return {
+        "authors": authors,
+        "title": title,
+        "type_marker": marker,
+        "source_title": source_title,
+        "year": year,
+        "tail_after_year": tail_after_year,
+        "patent_no": patent_no,
+        "url": url,
+        "doi": doi,
+        "publisher": publisher,
+        "place": place,
+    }
+
+
 def _has_citation_date(text: str) -> bool:
     return bool(re.search(r"\[[0-9]{4}[-/年][^\]]*\]", text)) or ("[引用日期]" in text)
 
@@ -2648,50 +2858,61 @@ def _has_page_range(text: str) -> bool:
 def _has_volume_issue(text: str) -> bool:
     return bool(re.search(r"\d+\s*[（(]\s*\d+\s*[)）]", text))
 
+def _has_journal_volume_or_page(text: str) -> bool:
+    patterns = [
+        r"\d+\s*\(\s*\d+\s*\)\s*:\s*\d+(?:\s*[-–—]\s*\d+)?",
+        r"\d+\s*,\s*\d+\s*\(\s*\d+\s*\)\s*:\s*\d+",
+        r"\d+\s*[-–—]\s*\d+",
+        r":\s*\d+",
+    ]
+    return any(re.search(p, text) for p in patterns)
+
 
 def _reference_missing_elements(marker: str, text: str) -> list[str]:
+    parsed = parse_reference_entry(text)
     missing: list[str] = []
-    head = text.split(".", 1)[0]
-    if len(head.strip()) <= 3:
+    if not parsed["authors"]:
         missing.append("责任者")
-    if "." not in text:
+    if not parsed["title"]:
         missing.append("题名")
     if marker == "J":
-        if not _has_year(text):
+        if not parsed["source_title"]:
+            missing.append("刊名")
+        if not parsed["year"]:
             missing.append("年份")
-        if not _has_volume_issue(text):
-            missing.append("卷期")
-        if not _has_page_range(text):
-            missing.append("页码")
+        if not _has_journal_volume_or_page(parsed["tail_after_year"] or text):
+            missing.append("卷期或页码")
     elif marker in {"M", "C"}:
-        if ":" not in text and "：" not in text:
-            missing.append("出版地/出版者分隔")
-        if not _has_year(text):
+        if marker == "M" and not parsed["place"]:
+            missing.append("出版地")
+        if not parsed["publisher"]:
+            missing.append("出版者")
+        if not parsed["year"]:
             missing.append("出版年")
     elif marker == "R":
-        if not _has_year(text):
+        if not parsed["year"]:
             missing.append("年份")
-        if ":" not in text and "：" not in text:
+        if not parsed["source_title"] and not parsed["publisher"]:
             missing.append("出版地或机构")
     elif marker == "D":
         if not re.search(r"大学|学院|研究院|研究所|学校", text):
             missing.append("保存单位")
-        if ":" not in text and "：" not in text:
-            missing.append("保存地点")
-        if not _has_year(text):
+        if not (":" in text or "：" in text):
+            missing.append("保存地")
+        if not parsed["year"]:
             missing.append("年份")
     elif marker == "P":
-        if not re.search(r"(CN|US|EP|JP)\s*\d+|专利号", text, re.I):
+        if not parsed["patent_no"]:
             missing.append("专利号")
-        if not re.search(r"(19|20)\d{2}[-/年]", text):
+        if not parsed["year"] and not re.search(r"(19|20)\d{2}[-/.年]\d{1,2}", text):
             missing.append("公告/公开日期")
     elif marker == "S":
-        if not re.search(r"\b(?:GB|GB/T|ISO|IEC|IEEE|CY/T)[-／/A-Z0-9.]*", text, re.I):
+        if not re.search(r"\b(?:GB|GB/T|ISO|IEC|IEEE|CY/T)[-\sA-Z0-9.]*", text, re.I):
             missing.append("标准编号")
-        if not _has_year(text):
+        if not parsed["year"]:
             missing.append("年份")
     elif marker == "N":
-        if not re.search(r"(19|20)\d{2}[-/年]", text):
+        if not re.search(r"(19|20)\d{2}[-/.年]", text):
             missing.append("出版日期")
         if not re.search(r"[（(][A-Za-z0-9一二三四五六七八九十]+[)）]|第?\d+版", text):
             missing.append("版次")
@@ -2733,11 +2954,28 @@ def _matches_any_272_format(text: str, marker: str | None) -> tuple[list[str], d
     return matched, missing_map
 
 
+
+
+def _reference_issue(paragraph_index: int, rule_key: str, text_type: str, current: str, expected: str, excerpt: str = "", category: str = "references") -> Issue:
+    location = f"paragraph {paragraph_index}" if paragraph_index >= 0 else "references"
+    return Issue(
+        paragraph_index=paragraph_index,
+        rule_key=rule_key,
+        text_type=text_type,
+        text_excerpt=excerpt or location,
+        current=current,
+        expected=expected,
+        message=f"文本类型：{text_type}\n当前位置：{location}\n当前情况：{current}\n应改为：{expected}",
+        category=category,
+        location=location,
+    )
+
 def _reference_entries_from_regions(paragraphs, texts: list[str], regions: list[str]) -> tuple[list[dict[str, object]], list[Issue]]:
     entries: list[dict[str, object]] = []
     issues: list[Issue] = []
     current: dict[str, object] | None = None
     inferred_no = 1
+    numbering_counters: dict[tuple[str, str], int] = {}
     for idx, paragraph in enumerate(paragraphs):
         if idx >= len(regions) or regions[idx] != "references":
             continue
@@ -2746,34 +2984,39 @@ def _reference_entries_from_regions(paragraphs, texts: list[str], regions: list[
             continue
         if compact_text(text) == "参考文献":
             continue
-        number_match = _reference_entry_start_match(text)
-        if number_match:
+
+        text_no = _reference_text_number(text)
+        has_auto_no = has_word_auto_numbering(paragraph)
+        looks_like_entry = bool(text_no is not None or has_auto_no or _looks_like_reference_entry_text(text))
+
+        if looks_like_entry:
+            visual_index, numbering_source = get_reference_visual_index(paragraph, inferred_no, numbering_counters)
+            numbering_source_for_summary = numbering_source
+            if numbering_source == "word_auto_numbering":
+                key = (str((get_paragraph_numbering(paragraph) or {}).get("num_id") or ""), str((get_paragraph_numbering(paragraph) or {}).get("ilvl") or "0"))
+                if key in numbering_counters and numbering_counters[key] == visual_index:
+                    numbering_source_for_summary = "word_auto_numbering_assumed_continuous"
             current = {
                 "start_idx": idx,
-                "number": int((number_match.group(1) or number_match.group(2))),
+                "number": visual_index,
+                "visual_index": visual_index,
+                "numbering_source": "text" if text_no is not None else numbering_source_for_summary,
                 "parts": [text],
                 "paragraph_indices": [idx],
             }
             entries.append(current)
-            inferred_no = int(current["number"]) + 1
+            inferred_no = max(inferred_no, int(visual_index) + 1)
+            if text_no is None and not has_auto_no:
+                issues.append(_reference_issue(idx, "reference_entry_number_missing", "reference entry", "条目缺少序号。", "参考文献条目应以连续序号开头。", text[:120]))
             continue
-        if _looks_like_reference_entry_text(text):
-            current = {
-                "start_idx": idx,
-                "number": inferred_no,
-                "parts": [text],
-                "paragraph_indices": [idx],
-            }
-            entries.append(current)
-            inferred_no += 1
-            issues.append(_issue_global("reference_entry_number_missing", "reference entry", "条目缺少序号。", "参考文献条目应以连续[序号]开头。", "references", f"paragraph {idx}", text[:120]))
-            continue
+
         if current is None:
-            issues.append(_issue_global("reference_entry_number_missing", "reference entry", "条目缺少序号。", "参考文献条目应以连续[序号]开头。", "references", f"paragraph {idx}", text[:120]))
+            issues.append(_reference_issue(idx, "reference_entry_number_missing", "reference entry", "条目缺少序号。", "参考文献条目应以连续序号开头。", text[:120]))
             continue
+
         current["parts"].append(text)
         current["paragraph_indices"].append(idx)
-        issues.append(_issue_global("reference_entry_continuation_review", "reference entry continuation", "疑似参考文献续行，需要人工确认。", "参考文献续行应与上一条合并核对著录格式。", "references", f"paragraph {idx}", text[:120]))
+        issues.append(_reference_issue(idx, "reference_entry_continuation_review", "reference entry continuation", "疑似参考文献续行，需要人工确认。", "参考文献续行应与上一条合并核对著录格式。", text[:120]))
     return entries, issues
 
 
@@ -2813,6 +3056,9 @@ def _reference_272_check_summary(entries: list[dict[str, object]]) -> dict[str, 
         summary_entries.append(
             {
                 "index": int(entry["number"]),
+                "visual_index": int(entry.get("visual_index", entry["number"])),
+                "numbering_source": str(entry.get("numbering_source", "inferred")),
+                "paragraph_index": int(entry.get("start_idx", -1)),
                 "text_excerpt": text[:160],
                 "detected_type": marker or "",
                 "matched_template": matched_formats[0] if matched_formats else "",
@@ -2836,7 +3082,7 @@ def collect_reference_issues(document: Document) -> list[Issue]:
     entries, entry_issues = _reference_entries_from_regions(document.paragraphs, texts, regions)
     issues.extend(entry_issues)
     if not entries:
-        reference_title_idx = next((i for i, t in enumerate(texts) if re.match(r"^\s*\u53c2\u8003\u6587\u732e\s*$", t.strip())), -1)
+        reference_title_idx = next((i for i, t in enumerate(texts) if re.match(r"^\s*参考文献\s*$", t.strip())), -1)
         if reference_title_idx >= 0:
             fallback_regions = ["other"] * len(texts)
             for i in range(reference_title_idx + 1, len(texts)):
@@ -2845,80 +3091,49 @@ def collect_reference_issues(document: Document) -> list[Issue]:
             issues.extend(entry_issues)
     has_reference_title = any(idx < len(regions) and regions[idx] == "references" and compact_text(paragraph_text(p)) == "参考文献" for idx, p in enumerate(document.paragraphs))
     if not has_reference_title:
-        has_reference_title = any(re.match(r"^\s*\u53c2\u8003\u6587\u732e\s*$", paragraph_text(p).strip()) for p in document.paragraphs)
+        has_reference_title = any(re.match(r"^\s*参考文献\s*$", paragraph_text(p).strip()) for p in document.paragraphs)
     if has_reference_title and not entries:
         issues.append(_issue_global("reference_entries_not_detected", "reference entries detection", "已检测到参考文献标题，但未能识别参考文献条目。", "请检查分段或编号格式，使条目能被识别并检查。", "references", "references section"))
+
     expected_no = 1
     for entry in entries:
         idx = int(entry["start_idx"])
         text = " ".join(str(x).strip() for x in entry["parts"]).strip()
-        current_no = int(entry["number"])
-        if current_no != expected_no:
-            issues.append(_issue_global("reference_sequence", "reference entry", f"序号不连续：期望[{expected_no}]，实际[{current_no}]。", "应使用连续的[序号]，并符合规范2.7.2和2.7.3。", "references", f"paragraph {idx}", text[:120]))
+        current_no = int(entry.get("visual_index", entry["number"]))
+        numbering_source = str(entry.get("numbering_source", "inferred"))
+        if numbering_source != "inferred" and current_no != expected_no:
+            issues.append(_reference_issue(idx, "reference_sequence", "reference entry", f"序号不连续：期望[{expected_no}]，实际[{current_no}]。", "应使用连续的序号，并符合规范2.7.2和2.7.3。", text[:120]))
             expected_no = current_no
         expected_no += 1
 
         marker = _reference_type_marker(text)
         if marker is None:
-            issues.append(_issue_global("reference_type_marker", "reference entry", "缺少文献类型标识（如[M]/[J]/[D]/[EB/OL]）。", "应包含类型标识并符合规范2.7.2和2.7.3。", "references", f"paragraph {idx}", text[:120]))
+            issues.append(_reference_issue(idx, "reference_type_marker", "reference entry", "缺少文献类型标识（如[M]/[J]/[D]/[EB/OL]）。", "应包含类型标识并符合规范2.7.2和2.7.3。", text[:120]))
         matched_formats, missing_map = _matches_any_272_format(text, marker)
         if marker and marker in REFERENCE_272_FORMATS and marker not in matched_formats:
             template = str(REFERENCE_272_FORMATS[marker]["template_text"])
             missing_elements = "、".join(missing_map.get(marker, [])) or "未识别完整要素"
-            issues.append(
-                _issue_global(
-                    "reference_272_type_format_mismatch",
-                    "reference entry 2.7.2 type format",
-                    f"当前条目类型标识为[{marker}]，但缺失要素：{missing_elements}。",
-                    "该条目应符合其文献类型标识对应的 2.7.2 著录格式。",
-                    "references",
-                    f"paragraph {idx}",
-                    text[:200],
-                )
-            )
-            issues.append(
-                _issue_global(
-                    "reference_entry_format",
-                    "reference entry",
-                    f"类型[{marker}]建议模板：{template}",
-                    "该检查为启发式检查，需人工确认。",
-                    "references",
-                    f"paragraph {idx}",
-                    text[:200],
-                )
-            )
+            issues.append(_reference_issue(idx, "reference_272_type_format_mismatch", "reference entry 2.7.2 type format", f"当前条目类型标识为[{marker}]，但缺失要素：{missing_elements}。", "该条目应符合其文献类型标识对应的2.7.2著录格式。", text[:200]))
+            issues.append(_reference_issue(idx, "reference_entry_format", "reference entry", f"类型[{marker}]建议模板：{template}", "该检查为启发式检查，需要人工确认。", text[:200]))
 
         if not matched_formats and not (marker and marker in REFERENCE_272_FORMATS):
             tried = "/".join([k for k in REFERENCE_272_FORMATS.keys()])
-            missing_summary = "; ".join(
-                f"{k}: {('、'.join(v) if v else '要素未完整匹配')}" for k, v in missing_map.items()
-            )
-            issues.append(
-                _issue_global(
-                    "reference_272_format_no_match",
-                    "reference entry 2.7.2 format",
-                    f"当前条目未匹配 {tried} 任一种格式；类型标识={marker or '无'}；缺失要素：{missing_summary}",
-                    "参考文献条目应符合 2.7.2 中至少一种主要参考文献著录格式。",
-                    "references",
-                    f"paragraph {idx}",
-                    text[:220],
-                )
-            )
+            missing_summary = "; ".join(f"{k}: {('、'.join(v) if v else '要素未完整匹配')}" for k, v in missing_map.items())
+            issues.append(_reference_issue(idx, "reference_272_format_no_match", "reference entry 2.7.2 format", f"当前条目未匹配{tried}任一种格式；类型标识={marker or '无'}；缺失要素：{missing_summary}", "参考文献条目应符合2.7.2中至少一种主要参考文献著录格式。", text[:220]))
 
         online_source = _has_online_path(text)
         if online_source and not _has_citation_date(text):
-            issues.append(_issue_global("reference_273_online_access_missing", "reference entry 2.7.3 online access", "条目含在线来源特征(URL/DOI)但缺少[引用日期]。", "网上获取文献应补充[引用日期]、获取和访问路径、DOI或数字对象唯一标识符。", "references", f"paragraph {idx}", text[:200]))
+            issues.append(_reference_issue(idx, "reference_273_online_access_missing", "reference entry 2.7.3 online access", "条目含在线来源特征(URL/DOI)但缺少[引用日期]。", "网上获取文献应补充[引用日期]、获取和访问路径、DOI或数字对象唯一标识符。", text[:200]))
         if marker == "EB/OL" and not _has_online_path(text):
-            issues.append(_issue_global("reference_273_online_access_missing", "reference entry 2.7.3 online access", "电子资源[EB/OL]缺少访问路径。", "电子资源应包含获取和访问路径，并建议标注DOI或唯一标识符。", "references", f"paragraph {idx}", text[:200]))
+            issues.append(_reference_issue(idx, "reference_273_online_access_missing", "reference entry 2.7.3 online access", "电子资源[EB/OL]缺少访问路径。", "电子资源应包含获取和访问路径，并建议标注DOI或唯一标识符。", text[:200]))
 
         head_part = text.split(".", 1)[0]
-        author_items = [x.strip() for x in re.split(r"[，,、;；]|(?:\band\b)|&", head_part) if x.strip()]
+        author_items = [x.strip() for x in re.split(r"[,，、;；]|(?:\band\b)|&", head_part) if x.strip()]
         if len(author_items) >= 4 and ("等" not in head_part and "et al" not in text.lower()):
-            issues.append(_issue_global("reference_273_author_et_al", "reference entry 2.7.3 author list", "责任者疑似超过3人但未标注“等”或“et al.”。", "多人作者建议列前3位后加“等”；该检查为启发式，需人工确认。", "references", f"paragraph {idx}", text[:200]))
+            issues.append(_reference_issue(idx, "reference_273_author_et_al", "reference entry 2.7.3 author list", "责任者疑似超过3人但未标注“等”或“et al.”。", "多人作者建议列前3位后加“等”；该检查为启发式，需要人工确认。", text[:200]))
         if "等" in head_part and len(author_items) < 3:
-            issues.append(_issue_global("reference_273_author_et_al", "reference entry 2.7.3 author list", "责任者包含“等”，但前置作者数量疑似不足3位。", "作者数量与“等”用法需人工确认；该检查为启发式。", "references", f"paragraph {idx}", text[:200]))
+            issues.append(_reference_issue(idx, "reference_273_author_et_al", "reference entry 2.7.3 author list", "责任者包含“等”，但前置作者数量疑似不足3位。", "作者数量与“等”用法需人工确认；该检查为启发式。", text[:200]))
     return issues
-
 
 def _shape_cm(value) -> float | None:
     if value is None:

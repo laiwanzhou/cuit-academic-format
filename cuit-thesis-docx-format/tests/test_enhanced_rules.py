@@ -215,6 +215,114 @@ def test_reference_entry_formatting_does_not_touch_body():
     assert mod.paragraph_matches(ref, mod.RULES["reference_entry"])
 
 
+def test_reference_word_auto_numbering_not_reported_missing():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("参考文献")
+    p = doc.add_paragraph("韩珂, 李相霏, 顾波. 基于Python语言的疫情大数据可视化方法:, CN202111256294.0[P]. 2022.")
+    p.style = doc.styles["List Number"]
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["references", "references"]}
+    issues = mod.collect_reference_issues(doc)
+    keys = {i.rule_key for i in issues}
+    assert "reference_entry_number_missing" not in keys
+    texts = [mod.paragraph_text(x) for x in doc.paragraphs]
+    entries, _ = mod._reference_entries_from_regions(doc.paragraphs, texts, ["references", "references"])
+    summary = mod._reference_272_check_summary(entries)
+    assert summary["entries"][0]["visual_index"] == 1
+    assert "word_auto_numbering" in summary["entries"][0]["numbering_source"]
+
+
+def test_reference_summary_includes_visual_index_and_numbering_source():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("参考文献")
+    doc.add_paragraph("[1] 张三. 题名[J]. 刊名, 2020, 1(2):3-5.")
+    texts = [mod.paragraph_text(x) for x in doc.paragraphs]
+    entries, _ = mod._reference_entries_from_regions(doc.paragraphs, texts, ["references", "references"])
+    summary = mod._reference_272_check_summary(entries)
+    entry = summary["entries"][0]
+    assert "visual_index" in entry
+    assert "numbering_source" in entry
+    assert "paragraph_index" in entry
+
+
+def test_reference_journal_single_page_count_accepts_page_field():
+    mod = load_module()
+    _issues, keys = _collect_reference_keys(
+        mod,
+        ["陈俊生, 彭莉芬. 基于Python+Echarts的大数据可视化系统的设计与实现[J]. 安徽电子信息职业技术学院学报, 2019, 18(4):5."],
+    )
+    assert "reference_272_type_format_mismatch" not in keys
+
+
+def test_reference_journal_author_single_chinese_name_detected():
+    mod = load_module()
+    _issues, keys = _collect_reference_keys(
+        mod,
+        ["张楚. 基于Python的文本可视化方法实现与应用[J]. 黑龙江科技信息, 2020, 000(028):144-145."],
+    )
+    assert "reference_272_type_format_mismatch" not in keys
+
+
+def test_reference_patent_cn_number_year_matches():
+    mod = load_module()
+    _issues, keys = _collect_reference_keys(
+        mod,
+        ["韩珂, 李相霏, 顾波. 基于Python语言的疫情大数据可视化方法:, CN202111256294.0[P]. 2022."],
+    )
+    assert "reference_272_type_format_mismatch" not in keys
+
+
+def test_reference_patent_single_author_detected():
+    mod = load_module()
+    _issues, keys = _collect_reference_keys(
+        mod,
+        ["孙惠玲. 一种疫情监测预警平台:, CN211787435U[P]. 2020."],
+    )
+    assert "reference_272_type_format_mismatch" not in keys
+
+
+def test_reference_book_publisher_year_detected_missing_place_only():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("参考文献")
+    doc.add_paragraph("IgorMilovanovic, 米洛万诺维奇, 颛清山. Python数据可视化编程实战[M]. 人民邮电出版社, 2015.")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["references", "references"]}
+    texts = [mod.paragraph_text(x) for x in doc.paragraphs]
+    entries, _ = mod._reference_entries_from_regions(doc.paragraphs, texts, ["references", "references"])
+    summary = mod._reference_272_check_summary(entries)
+    item = summary["entries"][0]
+    assert item["detected_type"] == "M"
+    assert item["status"] == "type_mismatch"
+    assert "出版地" in item["missing_fields"]
+    assert "出版者" not in item["missing_fields"]
+    assert "出版年" not in item["missing_fields"]
+
+
+def test_reference_number_missing_only_when_no_text_number_and_no_numpr():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("参考文献")
+    doc.add_paragraph("张三. 题名[J]. 刊名, 2020, 1(2):3-5.")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["references", "references"]}
+    issues = mod.collect_reference_issues(doc)
+    keys = {i.rule_key for i in issues}
+    assert "reference_entry_number_missing" in keys
+
+
+def test_reference_fix_does_not_touch_existing_completed_modules():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("ABSTRACT")
+    doc.add_paragraph("Key words: alpha; beta")
+    doc.add_paragraph("参考文献")
+    doc.add_paragraph("[1] 张三. 题名[J]. 刊名, 2020, 1(2):3-5.")
+    mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": ["abstract_en", "abstract_en", "references", "references"]}
+    mod.apply_supported_rules(doc, allow_layout_fixes=False)
+    assert doc.paragraphs[0].text == "ABSTRACT"
+    assert "Key words" in doc.paragraphs[1].text
+
+
 def test_empty_paragraph_cleanup_targets():
     mod = load_module()
     doc = mod.Document()

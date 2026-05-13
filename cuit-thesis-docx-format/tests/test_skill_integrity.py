@@ -458,5 +458,20 @@ class SkillIntegrityTests(unittest.TestCase):
         self.assertEqual(second, "成都市育龄人口生育意愿及其影响因素研究吴文雯_2")
 
 
+    def test_reference_summary_has_visual_index_and_numbering_source(self):
+        module = self.load_checker_module()
+        document = module.Document()
+        document.add_paragraph("参考文献")
+        paragraph = document.add_paragraph("韩珂, 李相霏, 顾波. 基于Python语言的疫情大数据可视化方法:, CN202111256294.0[P]. 2022.")
+        paragraph.style = document.styles["List Number"]
+        texts = [module.paragraph_text(p) for p in document.paragraphs]
+        entries, _ = module._reference_entries_from_regions(document.paragraphs, texts, ["references", "references"])
+        summary = module._reference_272_check_summary(entries)
+        item = summary["entries"][0]
+        self.assertIn("visual_index", item)
+        self.assertIn("numbering_source", item)
+        self.assertIn("paragraph_index", item)
+
+
 if __name__ == "__main__":
     unittest.main()
