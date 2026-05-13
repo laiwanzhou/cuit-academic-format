@@ -1666,6 +1666,9 @@ def _blank_paragraph_has_risky_nodes(paragraph) -> bool:
 
 
 def _is_effectively_blank_paragraph(paragraph) -> bool:
+    style_name = (paragraph.style.name if paragraph.style else "").lower()
+    if style_name.startswith("toc"):
+        return False
     if not _is_target_empty_paragraph_text(paragraph.text):
         return False
     if _paragraph_has_image_payload(paragraph):
@@ -2094,6 +2097,7 @@ def apply_page_setup(document: Document, allow_layout_fixes: bool) -> None:
             section.header_distance = Cm(1.5)
     if allow_layout_fixes:
         apply_cuit_page_headers(document, allow_layout_fixes=allow_layout_fixes)
+        ensure_toc_starts_new_page(document)
 
 
 def _section_format(section) -> str:
@@ -2440,11 +2444,70 @@ def paragraph_has_right_tab(paragraph) -> bool:
     return False
 
 
+def find_toc_start_paragraph_index(document: Document) -> int | None:
+    for idx, paragraph in enumerate(document.paragraphs):
+        if re.sub(r"\s+", "", paragraph_text(paragraph)) in {"目录", "目次"}:
+            return idx
+    for idx, paragraph in enumerate(document.paragraphs):
+        for node in paragraph._p.iter():
+            if node.tag == qn("w:instrText") and "TOC" in (node.text or "").upper():
+                return idx
+            if node.tag == qn("w:fldSimple") and "TOC" in (node.get(qn("w:instr")) or "").upper():
+                return idx
+    texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
+    regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
+    for idx, region in enumerate(regions):
+        if region == "toc":
+            return idx
+    for idx, text in enumerate(texts):
+        stripped = text.strip()
+        if re.search(r"(\.{2,}|…+)\s*\d+\s*$", stripped) and ("引言" in stripped or "章" in stripped):
+            return idx
+    for idx, paragraph in enumerate(document.paragraphs):
+        style_name = (paragraph.style.name if paragraph.style else "").lower()
+        if style_name.startswith("toc"):
+            return idx
+    for idx, text in enumerate(texts):
+        if "论文总页数" in text:
+            return idx - 1 if idx > 0 else idx
+    return None
+
+
+def _paragraph_has_page_break_node(paragraph) -> bool:
+    for node in paragraph._p.iter():
+        if node.tag == qn("w:br") and node.get(qn("w:type")) == "page":
+            return True
+        if node.tag == qn("w:lastRenderedPageBreak"):
+            return True
+    return False
+
+
+def ensure_toc_starts_new_page(document: Document) -> bool:
+    toc_idx = find_toc_start_paragraph_index(document)
+    if toc_idx is None:
+        return False
+    changed = False
+    toc_paragraph = document.paragraphs[toc_idx]
+    if toc_paragraph.paragraph_format.page_break_before is not True:
+        toc_paragraph.paragraph_format.page_break_before = True
+        changed = True
+    if toc_idx > 0:
+        prev = document.paragraphs[toc_idx - 1]
+        if (
+            _is_effectively_blank_paragraph(prev)
+            and _paragraph_has_page_break_node(prev)
+            and not _blank_paragraph_has_risky_nodes(prev)
+        ):
+            prev._element.getparent().remove(prev._element)
+            changed = True
+    return changed
+
+
 def collect_toc_issues(document: Document) -> list[Issue]:
     issues: list[Issue] = []
     xml = _document_xml_text(document)
     has_toc_field = "TOC" in xml and "instrText" in xml
-    has_toc_title = any(paragraph_text(p).replace(" ", "") == "目录" for p in document.paragraphs)
+    has_toc_title = any(re.sub(r"\s+", "", paragraph_text(p)) in {"目录", "目次"} for p in document.paragraphs)
     if has_toc_title and not has_toc_field:
         issues.append(
             _issue_global(
@@ -2481,6 +2544,39 @@ def collect_toc_issues(document: Document) -> list[Issue]:
                     message=f"文本类型：TOC page-number right tab\n当前格式：未检测到右对齐制表位\n应改为：目录页码右对齐。",
                     category="toc",
                     location=f"paragraph {idx}",
+                )
+            )
+    if has_toc_title or has_toc_field:
+        toc_idx = find_toc_start_paragraph_index(document)
+        if toc_idx is not None:
+            toc_paragraph = document.paragraphs[toc_idx]
+            prev_has_page_break = toc_idx > 0 and _paragraph_has_page_break_node(document.paragraphs[toc_idx - 1])
+            if toc_paragraph.paragraph_format.page_break_before is not True and not prev_has_page_break:
+                issues.append(
+                    Issue(
+                        paragraph_index=toc_idx,
+                        rule_key="toc_should_start_new_page",
+                        text_type="目录起始分页",
+                        text_excerpt=paragraph_text(toc_paragraph)[:160],
+                        current="目录标题与上一模块内容位于同一页或未检测到目录前分页。",
+                        expected="目录应另起一页。",
+                        message="已将目录标题设置为段前分页，使目录另起一页。",
+                        category="toc",
+                        location=f"paragraph {toc_idx}",
+                    )
+                )
+        else:
+            issues.append(
+                Issue(
+                    paragraph_index=-1,
+                    rule_key="toc_start_not_found_manual_review",
+                    text_type="目录起始定位",
+                    text_excerpt="TOC start",
+                    current="未能可靠定位目录标题或 TOC 起始段。",
+                    expected="目录应另起一页。",
+                    message="未能可靠定位目录标题或 TOC 起始段，无法自动设置目录另起页，请人工检查。",
+                    category="toc",
+                    location="document TOC",
                 )
             )
     return issues
