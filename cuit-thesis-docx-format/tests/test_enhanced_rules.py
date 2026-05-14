@@ -343,6 +343,112 @@ def test_html_issue_includes_expected_and_actual_problems():
         assert "本处问题：" in html
 
 
+def test_html_issue_does_not_duplicate_problem_heading():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "r.html"
+        report = {
+            "input": "x.docx",
+            "annotated_docx": "a.docx",
+            "fixed_docx": "f.docx",
+            "issue_count": 1,
+            "renderer_for_fixed": "ooxml",
+            "renderer_for_comments": "ooxml",
+            "screenshot_status": "skipped",
+            "issues": [
+                {
+                    "paragraph_index": 1,
+                    "text_type": "body paragraph",
+                    "text_excerpt": "正文",
+                    "current": "当前格式",
+                    "expected": "应为规范格式",
+                    "message": "本处问题：\n1. 固定行距未设置",
+                    "after": "已修复",
+                }
+            ],
+            "issue_summary_by_category": {},
+            "reference_272_check_summary": {"total_entries": 0, "matched_entries": 0, "type_mismatch_entries": 0, "unmatched_entries": 0, "entries": []},
+            "reference_273_check_summary": {"online_entries": 0, "author_et_al_review_entries": 0, "citation_date_missing_entries": 0, "access_path_missing_entries": 0, "doi_or_url_missing_entries": 0, "entries": []},
+        }
+        mod.write_html_report(report, p)
+        html = p.read_text(encoding="utf-8")
+        assert "本处问题：</strong>本处问题：" not in html
+        assert "本处问题：</strong>1. 固定行距未设置" in html
+
+
+def test_comment_merges_paragraph_and_run_issues_for_same_paragraph():
+    mod = load_module()
+    issues = [
+        mod.Issue(
+            paragraph_index=10,
+            rule_key="title_zh",
+            text_type="Chinese thesis title",
+            text_excerpt="题目",
+            current="疑似不符合项：固定行距：当前 继承/未直接设置，应为 20.0磅; 段落样式：Normal; 字号：16.0pt; 加粗：是",
+            expected="中文论文题目应为宋体三号16pt，加粗，居中，固定20磅行距。",
+            message="",
+            category="title",
+        ),
+        mod.Issue(
+            paragraph_index=10,
+            rule_key="title_zh_runs",
+            text_type="Chinese thesis title run formatting",
+            text_excerpt="题目",
+            current="文字片段='题目'；中文字体=黑体；西文字体=Times New Roman Regular；字号=16.0pt；加粗=是",
+            expected="中文论文题目应为宋体三号16pt，加粗，居中，固定20磅行距。",
+            message="",
+            category="run-format",
+        ),
+    ]
+    merged = mod._merge_comment_message(issues)
+    assert "固定行距：当前 继承/未直接设置，应为 20.0磅" in merged
+    assert "中文字体当前为 黑体" in merged
+
+
+def test_merged_comment_does_not_include_correct_items():
+    mod = load_module()
+    issues = [
+        mod.Issue(
+            paragraph_index=10,
+            rule_key="title_zh",
+            text_type="Chinese thesis title",
+            text_excerpt="题目",
+            current="疑似不符合项：固定行距：当前 继承/未直接设置，应为 20.0磅; 段落样式：Normal; 字号：16.0pt; 加粗：是; 对齐方式：居中",
+            expected="中文论文题目应为宋体三号16pt，加粗，居中，固定20磅行距。",
+            message="",
+            category="title",
+        ),
+        mod.Issue(
+            paragraph_index=10,
+            rule_key="title_zh_runs",
+            text_type="Chinese thesis title run formatting",
+            text_excerpt="题目",
+            current="文字片段='题目'；中文字体=黑体；西文字体=Times New Roman Regular；字号=16.0pt；加粗=是",
+            expected="中文论文题目应为宋体三号16pt，加粗，居中，固定20磅行距。",
+            message="",
+            category="run-format",
+        ),
+    ]
+    merged = mod._merge_comment_message(issues)
+    assert "字号：16.0pt" not in merged
+    assert "加粗：是" not in merged
+    assert "对齐方式：居中" not in merged
+
+
+def test_comment_author_still_neutral_after_merge():
+    mod = load_module()
+    root = mod.ET.Element(mod.qname(mod.W_NS, "comments"))
+    merged_text = mod._merge_comment_message(
+        [
+            mod.Issue(1, "body", "body", "正文", "疑似不符合项：固定行距：当前 继承/未直接设置，应为 20.0磅", "正文固定行距20磅", "", "body")
+        ]
+    )
+    mod.add_comment_node(root, 1, merged_text)
+    comment = root.find(mod.qname(mod.W_NS, "comment"))
+    assert comment is not None
+    assert comment.get(mod.qname(mod.W_NS, "author")) == "thesis format skill"
+
+
 def test_reference_semantic_issue_keeps_manual_edit_after():
     mod = load_module()
     issue = mod.Issue(

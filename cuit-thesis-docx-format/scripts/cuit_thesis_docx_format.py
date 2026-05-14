@@ -3774,27 +3774,47 @@ def comment_message_for_issue(issue: Issue) -> str:
     return "\n".join(lines)
 
 
+def _merge_comment_message(issues: list[Issue]) -> str:
+    if not issues:
+        return ""
+    title = _comment_title(issues[0])
+    expected_items: list[str] = []
+    seen_expected: set[str] = set()
+    problem_items: list[str] = []
+    seen_problem: set[str] = set()
+    for issue in issues:
+        expected = (issue.expected or "").strip()
+        if expected and expected not in seen_expected:
+            expected_items.append(expected)
+            seen_expected.add(expected)
+        for item in _issue_problem_lines(issue.current):
+            cleaned = item.strip()
+            if not cleaned or cleaned in seen_problem:
+                continue
+            problem_items.append(cleaned)
+            seen_problem.add(cleaned)
+    if not expected_items:
+        expected_items = ["请按规范要求设置。"]
+    if not problem_items:
+        problem_items = ["检测到该段可能不符合规范，建议人工复核。"]
+    lines = [f"{title}格式不符合要求。", "", "正确格式："]
+    for idx, item in enumerate(expected_items, start=1):
+        lines.append(f"{idx}. {item}")
+    lines.extend(["", "本处问题："])
+    for idx, item in enumerate(problem_items, start=1):
+        lines.append(f"{idx}. {item}")
+    return "\n".join(lines)
+
+
 def issues_for_comments(issues: Iterable[Issue]) -> list[Issue]:
     selected: list[Issue] = []
-    by_paragraph_and_rule: set[tuple[int, str]] = set()
-    deferred_run_issues: list[Issue] = []
-
+    seen: set[tuple[int, str, str]] = set()
     for issue in issues:
-        base_rule = issue.rule_key.removesuffix("_runs")
-        key = (issue.paragraph_index, base_rule)
-        if issue.rule_key.endswith("_runs"):
-            deferred_run_issues.append(issue)
+        key = (issue.paragraph_index, issue.rule_key, issue.current or "")
+        if key in seen:
             continue
+        seen.add(key)
         selected.append(issue)
-        by_paragraph_and_rule.add(key)
-
-    for issue in deferred_run_issues:
-        base_rule = issue.rule_key.removesuffix("_runs")
-        key = (issue.paragraph_index, base_rule)
-        if key not in by_paragraph_and_rule:
-            selected.append(issue)
-            by_paragraph_and_rule.add(key)
-
     return selected
 
 
@@ -3829,15 +3849,20 @@ def create_annotated_docx(source: Path, target: Path, issues: Iterable[Issue]) -
         doc_tree = ET.parse(document_xml)
         doc_root = doc_tree.getroot()
         paragraphs = doc_root.findall(f".//{qname(W_NS, 'body')}/{qname(W_NS, 'p')}")
+        issues_by_paragraph: dict[int, list[Issue]] = {}
         for issue in issues:
             if issue.paragraph_index < 0:
                 continue
             if issue.paragraph_index >= len(paragraphs):
                 continue
+            issues_by_paragraph.setdefault(issue.paragraph_index, []).append(issue)
+
+        for paragraph_index in sorted(issues_by_paragraph.keys()):
+            merged_issues = issues_by_paragraph[paragraph_index]
             comment_id = next_id
             next_id += 1
-            add_comment_node(comments_root, comment_id, comment_message_for_issue(issue))
-            add_comment_marker(paragraphs[issue.paragraph_index], comment_id)
+            add_comment_node(comments_root, comment_id, _merge_comment_message(merged_issues))
+            add_comment_marker(paragraphs[paragraph_index], comment_id)
 
         comments_tree.write(tmpdir / "word" / "comments.xml", encoding="utf-8", xml_declaration=True)
         doc_tree.write(document_xml, encoding="utf-8", xml_declaration=True)
@@ -4433,6 +4458,9 @@ def write_html_report(report: dict[str, object], path: Path) -> None:
                 f'<figure><figcaption>修改后</figcaption>'
                 f'<img src="{html.escape(after_uri)}"></figure></div>'
             )
+        problem_text = str(issue.get("message") or "")
+        if problem_text.startswith("本处问题："):
+            problem_text = problem_text[len("本处问题：") :].lstrip("\r\n ")
         rows.append(
             "<section class='issue'>"
             f"<h2>#{n} {html.escape(str(issue.get('text_type', 'unknown')))}</h2>"
@@ -4441,7 +4469,7 @@ def write_html_report(report: dict[str, object], path: Path) -> None:
             f"<p><strong>文本：</strong>{html.escape(str(issue.get('text_excerpt') or ''))}</p>"
             f"<p><strong>修改前：</strong>{html.escape(str(issue.get('current') or ''))}</p>"
             f"<p><strong>正确格式：</strong>{html.escape(str(issue.get('expected') or ''))}</p>"
-            f"<p><strong>本处问题：</strong>{html.escape(str(issue.get('message') or ''))}</p>"
+            f"<p><strong>本处问题：</strong>{html.escape(problem_text)}</p>"
             f"<p><strong>修改后：</strong>{html.escape(str(issue.get('after') or ''))}</p>"
             f"{screenshots}"
             "</section>"
