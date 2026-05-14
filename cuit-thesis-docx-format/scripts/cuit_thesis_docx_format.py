@@ -4673,42 +4673,35 @@ def write_html_report(report: dict[str, object], path: Path) -> None:
         llm_block = [
             "<section class='structure'>",
             "<h2>LLM 高风险格式复核</h2>",
-            "<p>该部分由大语言模型根据脚本诊断摘要辅助复核，仅作为人工检查参考；不会自动修改文档。</p>",
+            "<p>该部分由大语言模型辅助审查，仅作为人工检查参考；不会自动修改文档。</p>",
         ]
         if report.get("llm_review_html"):
-            llm_block.append(f"<p><strong>鐙珛 LLM 澶嶆牳鎶ュ憡锛?/strong>{html.escape(str(report.get('llm_review_html')))}</p>")
+            llm_block.append(f"<p><strong>独立 LLM 复核报告：</strong>{html.escape(str(report.get('llm_review_html')))}</p>")
         if report.get("llm_fixed_docx"):
-            llm_block.append(f"<p><strong>LLM 淇敼鍚庢枃妗ｏ紙llm_fixed锛夛細</strong>{html.escape(str(report.get('llm_fixed_docx')))}</p>")
+            llm_block.append(f"<p><strong>LLM 修改后文档（llm_fixed）：</strong>{html.escape(str(report.get('llm_fixed_docx')))}</p>")
         if isinstance(report.get("llm_apply_result"), dict):
             apply_result = report["llm_apply_result"]
             llm_block.append(
-                f"<p><strong>safe_edit_plan 搴旂敤缁熻锛?/strong>applied={html.escape(str(apply_result.get('applied_count', 0)))}, "
+                f"<p><strong>safe_edit_plan 应用统计：</strong>applied={html.escape(str(apply_result.get('applied_count', 0)))}, "
                 f"skipped={html.escape(str(apply_result.get('skipped_count', 0)))}</p>"
             )
         if llm.get("enabled") is False:
             llm_block.append("<p>未启用 LLM 高风险格式复核。</p>")
         elif llm_status == "skipped" and llm.get("reason") == "missing_api_key":
             llm_block.append("<p>已请求 LLM 复核，但未配置 DASHSCOPE_API_KEY，因此已跳过。</p>")
-        elif llm_status:
+        elif llm_status == "ok" and isinstance(llm.get("review"), dict):
+            review = llm["review"]
+            basis = review.get("basis") if isinstance(review.get("basis"), dict) else {}
             llm_block.append(
                 f"<p><strong>provider/model：</strong>{html.escape(str(llm.get('provider', '')))} / {html.escape(str(llm.get('model', '')))}</p>"
-                f"<p><strong>mode：</strong>{html.escape(str(llm.get('mode', '')))}</p>"
-                f"<p><strong>evidence_source：</strong>{html.escape(str(llm.get('evidence_source', 'none')))}</p>"
-                f"<p><strong>vision_status：</strong>{html.escape(str(llm.get('vision_status', '')))}</p>"
+                f"<p><strong>document_upload_status：</strong>{html.escape(str(basis.get('document_upload_status', llm.get('document_upload_status', ''))))}</p>"
+                f"<p><strong>overall_result：</strong>{html.escape(str(review.get('overall_result', '')))}</p>"
+                f"<p><strong>overall_risk：</strong>{html.escape(str(review.get('overall_risk', '')))}</p>"
             )
-            if llm_status == "ok" and isinstance(llm.get("review"), dict):
-                review = llm["review"]
-                pages = review.get("reviewed_pages", [])
-                llm_block.append(f"<p><strong>overall_risk：</strong>{html.escape(str(review.get('overall_risk', '')))}</p>")
-                if isinstance(pages, list) and pages:
-                    llm_block.append(f"<p><strong>reviewed_pages：</strong>{html.escape(json.dumps(pages, ensure_ascii=False))}</p>")
-                if llm.get("vision_status") == "ok":
-                    llm_block.append("<p><strong>本次 LLM 已基于生成文件页面截图进行复核。</strong></p>")
-                else:
-                    llm_block.append("<p><strong>本次未完成生成文件视觉复核，LLM 结果仅基于脚本摘要，不能判断真实空白页、目录页脚页码或三线表视觉效果。</strong></p>")
-                llm_block.append(f"<pre>{html.escape(json.dumps(review, ensure_ascii=False, indent=2))}</pre>")
-            else:
-                llm_block.append(f"<p>LLM 复核执行失败：{html.escape(str(llm.get('reason', llm_status)))}</p>")
+            if basis.get("document_upload_status") != "ok":
+                llm_block.append("<p><strong>本次未能通过 API 直接提交 Word 文档，已回退为文本/结构化摘要审查。</strong></p>")
+        else:
+            llm_block.append(f"<p>LLM 复核执行失败：{html.escape(str(llm.get('reason', llm_status)))}</p>")
         llm_block.append("</section>")
         llm_html = "".join(llm_block)
     else:
@@ -4796,11 +4789,13 @@ code {{ background: #f3f4f6; padding: 1px 4px; }}
 def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) -> None:
     review = llm_review.get("review") if isinstance(llm_review, dict) else {}
     review = review if isinstance(review, dict) else {}
-    basis = review.get("review_basis") if isinstance(review.get("review_basis"), dict) else {}
+    basis = review.get("basis") if isinstance(review.get("basis"), dict) else {}
     issues = review.get("issues") if isinstance(review.get("issues"), list) else []
+    manual_items = review.get("manual_review_items") if isinstance(review.get("manual_review_items"), list) else []
     issues_sorted = sorted([x for x in issues if isinstance(x, dict)], key=lambda x: str(x.get("page", "unknown")))
-    items = "".join(
+    issue_rows = "".join(
         "<tr>"
+        f"<td>{html.escape(str(it.get('id', '')))}</td>"
         f"<td>{html.escape(str(it.get('page', 'unknown')))}</td>"
         f"<td>{html.escape(str(it.get('type', 'other')))}</td>"
         f"<td>{html.escape(str(it.get('severity', '')))}</td>"
@@ -4810,28 +4805,53 @@ def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) ->
         "</tr>"
         for it in issues_sorted
     )
-    warn = ""
-    if llm_review.get("vision_status") != "ok":
-        warn = "<p><strong>本次未能完成页面截图复核，结果不代表真实页面效果。</strong></p>"
+    manual_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(it.get('page', 'unknown')))}</td>"
+        f"<td>{html.escape(str(it.get('reason', '')))}</td>"
+        f"<td>{html.escape(str(it.get('suggestion', '')))}</td>"
+        "</tr>"
+        for it in manual_items
+        if isinstance(it, dict)
+    )
+    status = str(basis.get("document_upload_status", llm_review.get("document_upload_status", "failed")))
+    fallback_used = bool(basis.get("fallback_used", llm_review.get("fallback_used", False)))
+    fallback_reason = str(basis.get("fallback_reason", llm_review.get("fallback_reason", "")))
+    apply_result = llm_review.get("apply_result") if isinstance(llm_review.get("apply_result"), dict) else {}
+    fallback_note = ""
+    if status != "ok":
+        fallback_note = "<p><strong>本次未能通过 API 直接提交 Word 文档，已回退为文本/结构化摘要审查。</strong></p>"
     doc = f"""<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>LLM 视觉格式复核报告</title>
-<style>body{{font-family:\"Microsoft YaHei\",sans-serif;margin:24px}}table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding:6px;vertical-align:top}}</style>
-</head><body>
-<h1>LLM 视觉格式复核报告</h1>
-<p>该报告由大语言模型根据生成后的文档页面截图和格式指导书辅助复核，仅供人工检查参考，不会自动修改文档。</p>
-<p><strong>模型：</strong>{html.escape(str(llm_review.get("model", "")))}</p>
-<p><strong>是否使用指导书：</strong>{html.escape(str(basis.get("uses_spec_docx", False)))}</p>
-<p><strong>是否使用 rendered after 图片：</strong>{html.escape(str(basis.get("uses_rendered_images", False)))}</p>
-<p><strong>图片上传方式：</strong>{html.escape(str(llm_review.get("image_upload_mode", "")))}</p>
-<p><strong>复核页码：</strong>{html.escape(str(basis.get("reviewed_pages", [])))}</p>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>LLM 格式审查与修改建议报告</title>
+<style>
+body {{ font-family: "Microsoft YaHei", sans-serif; margin: 24px; line-height: 1.6; }}
+table {{ border-collapse: collapse; width: 100%; }}
+th, td {{ border: 1px solid #d1d5db; padding: 6px; vertical-align: top; text-align: left; }}
+</style>
+</head>
+<body>
+<h1>LLM 格式审查与修改建议报告</h1>
+<p>该报告由千问根据格式指导书和 fixed 文档生成，仅供人工复核；llm_fixed 只应用低风险修改。</p>
+<p><strong>模型：</strong>{html.escape(str(llm_review.get("provider", "")))} / {html.escape(str(llm_review.get("model", "")))}</p>
+<p><strong>是否使用格式指导书 docx：</strong>{html.escape(str(basis.get("uses_spec_docx", llm_review.get("uses_spec_docx", False))))}</p>
+<p><strong>是否使用 fixed docx：</strong>{html.escape(str(basis.get("uses_fixed_docx", llm_review.get("uses_fixed_docx", False))))}</p>
+<p><strong>文档提交方式：</strong>{html.escape(status if status else "failed")}</p>
+<p><strong>是否回退文本审查：</strong>{html.escape(str(fallback_used))}</p>
+<p><strong>回退原因：</strong>{html.escape(fallback_reason)}</p>
+<p><strong>overall_result：</strong>{html.escape(str(review.get("overall_result", "")))}</p>
 <p><strong>overall_risk：</strong>{html.escape(str(review.get("overall_risk", "")))}</p>
-{warn}
-<h2>按页问题列表</h2>
-<table><thead><tr><th>页码</th><th>类型</th><th>严重度</th><th>证据</th><th>规范依据</th><th>建议</th></tr></thead><tbody>{items}</tbody></table>
-<h2>目录复核</h2><pre>{html.escape(json.dumps(review.get("toc_review", {}), ensure_ascii=False, indent=2))}</pre>
-<h2>三线表复核</h2><pre>{html.escape(json.dumps(review.get("table_review", []), ensure_ascii=False, indent=2))}</pre>
-<h2>空白页复核</h2><pre>{html.escape(json.dumps(review.get("blank_page_review", []), ensure_ascii=False, indent=2))}</pre>
-</body></html>"""
+<p><strong>llm_fixed 路径：</strong>{html.escape(str(llm_review.get("llm_fixed_docx", "")))}</p>
+<p><strong>safe_edit_plan 应用统计：</strong>applied={html.escape(str(apply_result.get("applied_count", 0)))}, skipped={html.escape(str(apply_result.get("skipped_count", 0)))}</p>
+{fallback_note}
+<h2>问题列表</h2>
+<table><thead><tr><th>ID</th><th>页码</th><th>类型</th><th>严重度</th><th>证据</th><th>规范依据</th><th>建议</th></tr></thead><tbody>{issue_rows}</tbody></table>
+<h2>manual_review_items</h2>
+<table><thead><tr><th>页码</th><th>原因</th><th>建议</th></tr></thead><tbody>{manual_rows}</tbody></table>
+</body>
+</html>"""
     path.write_text(doc, encoding="utf-8")
 
 
@@ -5249,43 +5269,136 @@ def _extract_chat_content(payload: dict) -> str:
     return str(msg.get("content") or "")
 
 
-def _build_llm_user_prompt(candidates: dict[str, object], mode: str, page_batch: list[dict[str, object]] | None = None) -> str:
-    spec_name = Path(str(candidates.get("spec_docx_path") or "")).name if candidates.get("spec_docx_path") else "unknown"
-    spec_text = str(candidates.get("spec_text") or "")
-    page_batch = page_batch or []
-    return (
-        "请仅输出 JSON 对象，严格符合以下 schema："
-        '{"llm_review_version":"2.0","review_basis":{"uses_spec_docx":true,"uses_rendered_images":true,"spec_name":"成都信息工程大学学士学位论文规范.docx","image_source":"render_qa_after","reviewed_pages":[1,2,3]},"overall_risk":"low|medium|high","issues":[{"page":"number or unknown","type":"blank_page|toc_page_number|toc_start_page|header_footer|three_line_table|figure_caption|table_caption|image_missing|reference_format|spacing|font|other","severity":"low|medium|high","evidence":"string","spec_basis":"string","suggestion":"string","confidence":"low|medium|high"}],'
-        '"blank_page_review":[{"page":"number or unknown","status":"ok|suspected_blank_page|manual_review_needed|not_sure","evidence":"string","suggestion":"string","confidence":"low|medium|high"}],'
-        '"toc_review":{"status":"ok|manual_review_needed|not_sure","toc_entry_page_numbers":"arabic|wrong|not_sure","toc_footer_page_number":"lower_roman|arabic|wrong|not_sure","toc_starts_new_page":"yes|no|not_sure","evidence":"string","suggestion":"string"},'
-        '"table_review":[{"page":"number or unknown","status":"ok|not_three_line_table|manual_review_needed|not_sure","evidence":"string","suggestion":"string","confidence":"low|medium|high"}],'
-        '"figure_review":[{"page":"number or unknown","caption":"string","status":"ok|image_missing_near_caption|manual_review_needed|not_sure","evidence":"string","suggestion":"string"}],'
-        '"reference_review":[{"entry_index":"string","status":"ok|manual_review_needed|not_sure","evidence":"string","suggestion":"string"}],"notes":["string"]}。'
-        f"当前模式：{mode}。\n"
-        f"格式指导书文件名：{spec_name}\n"
-        f"格式指导书完整提取文本：\n{spec_text}\n"
-        f"本批页面信息：{json.dumps(page_batch, ensure_ascii=False)}\n"
-        f"脚本摘要：{json.dumps(candidates.get('summary', {}), ensure_ascii=False)}"
-    )
-
-
-def _ensure_visual_fields(review: dict[str, object], mode: str, evidence_source: str, vision_status: str, reviewed_pages: list[dict[str, object]]) -> dict[str, object]:
-    review.setdefault("llm_review_version", "2.0")
-    review.setdefault("mode", mode)
-    review.setdefault("evidence_source", evidence_source)
-    review.setdefault("vision_status", vision_status)
-    review.setdefault("reviewed_pages", reviewed_pages)
-    review.setdefault(
-        "review_basis",
-        {
-            "uses_spec_docx": False,
-            "uses_rendered_images": evidence_source in {"fixed_render_images", "mixed"},
-            "spec_name": "",
-            "image_source": "render_qa_after" if evidence_source in {"fixed_render_images", "mixed"} else "none",
-            "reviewed_pages": [p.get("page") for p in reviewed_pages if isinstance(p, dict)],
+def _build_llm_user_prompt(candidates: dict[str, object], *, fallback_used: bool) -> str:
+    schema = {
+        "llm_review_version": "4.0",
+        "provider": "dashscope",
+        "model": "qwen3.6-plus",
+        "basis": {
+            "uses_spec_docx": True,
+            "uses_fixed_docx": True,
+            "uses_rendered_images": False,
+            "document_upload_status": "ok|fallback_text|failed",
+            "fallback_used": False,
+            "fallback_reason": "",
+            "spec_name": "成都信息工程大学学士学位论文规范.docx",
+            "fixed_docx_name": "xxx_format_fixed_yyy.docx",
         },
+        "overall_result": "pass|needs_manual_review|needs_fix",
+        "overall_risk": "low|medium|high",
+        "issues": [],
+        "manual_review_items": [],
+        "safe_edit_plan": [],
+        "notes": [],
+    }
+    fixed_structure = candidates.get("fixed_docx_structure", {})
+    if isinstance(fixed_structure, dict):
+        fixed_structure = {
+            "headings": fixed_structure.get("headings", [])[:80],
+            "figure_captions": fixed_structure.get("figure_captions", [])[:80],
+            "table_captions": fixed_structure.get("table_captions", [])[:80],
+            "references": fixed_structure.get("references", [])[:50],
+            "table_count": fixed_structure.get("table_count", 0),
+            "image_count": fixed_structure.get("image_count", 0),
+            "paragraphs": fixed_structure.get("paragraphs", [])[:80],
+        }
+    return (
+        "You are a thesis format review assistant. You will receive a university format specification and a fixed thesis document, "
+        "or their extracted text/structured summary. Check whether the fixed document complies with the specification and output only JSON. "
+        "For high-risk actions (section breaks, TOC/PAGE fields, page-number fields, image positions, table borders, page breaks, header/footer inheritance), "
+        "mark manual_review and do not propose automatic edits.\n\n"
+        f"Return JSON in this schema: {json.dumps(schema, ensure_ascii=False)}\n\n"
+        f"Fallback to text summary: {fallback_used}\n"
+        f"Spec document path: {candidates.get('spec_docx_path', '')}\n"
+        f"Fixed document path: {candidates.get('summary', {}).get('fixed_docx', '')}\n"
+        f"Specification text: {str(candidates.get('spec_text', ''))[:30000]}\n"
+        f"Fixed document structure: {json.dumps(fixed_structure, ensure_ascii=False)}\n"
+        f"Deterministic checker summary: {json.dumps(candidates.get('summary', {}), ensure_ascii=False)}\n"
+        f"High risk findings: {json.dumps({'table_risks': candidates.get('table_risks', []), 'figure_risks': candidates.get('figure_risks', []), 'blank_or_page_risks': candidates.get('blank_or_page_risks', [])}, ensure_ascii=False)}"
     )
-    return review
+
+
+def probe_dashscope_document_upload_support(config: LLMReviewConfig, api_key: str, spec_docx: Path, fixed_docx: Path) -> dict[str, object]:
+    try:
+        if not spec_docx.exists() or not fixed_docx.exists():
+            return {"supported": False, "method": "fallback_text_extraction", "reason": "missing_docx_file"}
+        spec_upload = upload_llm_image_file(spec_docx, config, api_key)
+        fixed_upload = upload_llm_image_file(fixed_docx, config, api_key)
+        spec_file_id = spec_upload.get("id") if isinstance(spec_upload, dict) else None
+        fixed_file_id = fixed_upload.get("id") if isinstance(fixed_upload, dict) else None
+        if spec_file_id and fixed_file_id:
+            return {
+                "supported": True,
+                "method": "file_upload",
+                "file_ids": {"spec": str(spec_file_id), "fixed": str(fixed_file_id)},
+            }
+        return {"supported": False, "method": "fallback_text_extraction", "reason": "missing_file_id"}
+    except Exception as exc:
+        return {"supported": False, "method": "fallback_text_extraction", "reason": f"upload_error:{exc.__class__.__name__}"}
+
+
+def run_qwen_docx_review(*, config: LLMReviewConfig, api_key: str, candidates: dict[str, object]) -> dict[str, object]:
+    spec_docx = Path(str(candidates.get("spec_docx_path") or ""))
+    fixed_docx = Path(str(candidates.get("summary", {}).get("fixed_docx", "")))
+    probe = probe_dashscope_document_upload_support(config, api_key, spec_docx, fixed_docx)
+    upload_ok = bool(probe.get("supported"))
+    fallback_used = not upload_ok
+    fallback_reason = "" if upload_ok else str(probe.get("reason", "upload_not_supported"))
+    prompt = _build_llm_user_prompt(candidates, fallback_used=fallback_used)
+
+    if upload_ok:
+        file_ids = probe.get("file_ids", {})
+        messages = [
+            {"role": "system", "content": LLM_REVIEW_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "file", "file": {"file_id": str(file_ids.get("spec", ""))}},
+                    {"type": "file", "file": {"file_id": str(file_ids.get("fixed", ""))}},
+                ],
+            },
+        ]
+    else:
+        messages = [
+            {"role": "system", "content": LLM_REVIEW_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+
+    payload = call_openai_compatible_chat(
+        base_url=config.base_url,
+        api_key=api_key,
+        model=config.model,
+        messages=messages,
+        timeout=config.timeout,
+    )
+    parsed = parse_llm_review_response(_extract_chat_content(payload))
+    if parsed.get("status") == "failed":
+        return {"status": "failed", "reason": str(parsed.get("reason", "invalid_json")), "probe": probe}
+
+    basis = parsed.get("basis")
+    if not isinstance(basis, dict):
+        basis = {}
+        parsed["basis"] = basis
+    basis["uses_spec_docx"] = bool(candidates.get("spec_text")) or upload_ok
+    basis["uses_fixed_docx"] = True
+    basis.setdefault("uses_rendered_images", False)
+    basis["document_upload_status"] = "ok" if upload_ok else "fallback_text"
+    basis["fallback_used"] = fallback_used
+    basis["fallback_reason"] = fallback_reason
+    basis.setdefault("spec_name", spec_docx.name if spec_docx else "")
+    basis.setdefault("fixed_docx_name", fixed_docx.name if fixed_docx else "")
+
+    parsed.setdefault("llm_review_version", "4.0")
+    parsed.setdefault("provider", config.provider)
+    parsed.setdefault("model", config.model)
+    parsed.setdefault("overall_result", "needs_manual_review")
+    parsed.setdefault("overall_risk", "medium")
+    parsed.setdefault("issues", [])
+    parsed.setdefault("manual_review_items", [])
+    parsed.setdefault("safe_edit_plan", [])
+    parsed.setdefault("notes", [])
+    return {"status": "ok", "review": parsed, "probe": probe}
 
 
 def run_llm_review(config: LLMReviewConfig, candidates: dict[str, object], dotenv_values: dict[str, str] | None = None) -> dict[str, object]:
@@ -5299,150 +5412,52 @@ def run_llm_review(config: LLMReviewConfig, candidates: dict[str, object], doten
             "provider": config.provider,
             "model": config.model,
             "mode": config.mode,
-            "evidence_source": "none",
-            "vision_status": "not_requested",
             "base_url": config.base_url,
             "status": "skipped",
             "reason": "missing_api_key",
         }
-
-    reviewed_pages = candidates.get("reviewed_pages", []) if isinstance(candidates.get("reviewed_pages"), list) else []
-    image_paths = [p for p in candidates.get("review_image_paths", []) if isinstance(p, str)] if isinstance(candidates, dict) else []
-    evidence_source = "script_summary"
-    vision_status = "not_requested" if config.mode == "text" else "failed"
-    image_upload_mode = "fallback_text"
-
-    def _invoke(messages: list[dict[str, object]]) -> dict[str, object]:
-        payload = call_openai_compatible_chat(
-            base_url=config.base_url,
-            api_key=api_key,
-            model=config.model,
-            messages=messages,
-            timeout=config.timeout,
-        )
-        parsed = parse_llm_review_response(_extract_chat_content(payload))
-        if parsed.get("status") == "failed":
+    try:
+        result = run_qwen_docx_review(config=config, api_key=api_key, candidates=candidates)
+        if result.get("status") != "ok":
             return {
                 "enabled": True,
                 "provider": config.provider,
                 "model": config.model,
                 "mode": config.mode,
-                "evidence_source": evidence_source,
-                "vision_status": vision_status,
                 "base_url": config.base_url,
-                **parsed,
+                "status": "failed",
+                "reason": f"api_error:{result.get('reason', 'unknown')}",
             }
-        review = _ensure_visual_fields(parsed, config.mode, evidence_source, vision_status, reviewed_pages)
-        basis = review.get("review_basis")
-        if not isinstance(basis, dict):
-            basis = {}
-            review["review_basis"] = basis
-        basis["uses_spec_docx"] = bool(candidates.get("spec_text"))
-        basis["uses_rendered_images"] = evidence_source in {"fixed_render_images", "mixed"}
-        basis["spec_name"] = Path(str(candidates.get("spec_docx_path") or "")).name if candidates.get("spec_docx_path") else ""
-        basis["image_source"] = "render_qa_after" if evidence_source in {"fixed_render_images", "mixed"} else "script_summary"
-        basis["reviewed_pages"] = [p.get("page") for p in reviewed_pages if isinstance(p, dict)]
-        return {
+        review = result.get("review", {})
+        response = {
             "enabled": True,
             "provider": config.provider,
             "model": config.model,
             "mode": config.mode,
-            "evidence_source": evidence_source,
-            "vision_status": vision_status,
             "base_url": config.base_url,
-            "image_upload_mode": image_upload_mode,
             "status": "ok",
             "review": review,
+            "document_upload_status": review.get("basis", {}).get("document_upload_status", "fallback_text"),
+            "fallback_used": review.get("basis", {}).get("fallback_used", True),
+            "fallback_reason": review.get("basis", {}).get("fallback_reason", ""),
+            "uses_spec_docx": review.get("basis", {}).get("uses_spec_docx", False),
+            "uses_fixed_docx": review.get("basis", {}).get("uses_fixed_docx", False),
+            "image_upload_mode": "docx_upload" if review.get("basis", {}).get("document_upload_status") == "ok" else "fallback_text_extraction",
         }
-
-    try:
-        prefer_vision = config.mode in {"auto", "vision"} and bool(image_paths)
-        if prefer_vision:
-            image_upload_mode = "data_uri"
-            evidence_source = "fixed_render_images"
-            vision_status = "ok"
-            merged: dict[str, object] = {"issues": [], "notes": [], "table_review": [], "blank_page_review": [], "figure_review": [], "reference_review": []}
-            batch_size = max(1, config.batch_size)
-            for i in range(0, len(image_paths), batch_size):
-                batch_paths = image_paths[i : i + batch_size]
-                batch_pages = reviewed_pages[i : i + batch_size]
-                prompt = _build_llm_user_prompt(candidates, config.mode, batch_pages)
-                content: list[dict[str, object]] = [{"type": "text", "text": prompt}]
-                valid_image_count = 0
-                for image_path in batch_paths:
-                    if not Path(image_path).exists():
-                        continue
-                    content.append({"type": "image_url", "image_url": {"url": _image_to_data_uri(str(image_path))}})
-                    valid_image_count += 1
-                if valid_image_count == 0:
-                    continue
-                batch_result = _invoke([{"role": "system", "content": LLM_REVIEW_SYSTEM_PROMPT}, {"role": "user", "content": content}])
-                if batch_result.get("status") != "ok":
-                    result = batch_result
-                    break
-                review = batch_result.get("review", {})
-                if isinstance(review, dict):
-                    for key in ["issues", "notes", "table_review", "blank_page_review", "figure_review", "reference_review", "safe_edit_plan", "manual_review_items"]:
-                        if isinstance(review.get(key), list):
-                            merged[key].extend(review[key])
-                    merged["overall_risk"] = review.get("overall_risk", merged.get("overall_risk", "medium"))
-                    merged["toc_review"] = review.get("toc_review", merged.get("toc_review", {}))
-            else:
-                merged["llm_review_version"] = "3.0"
-                merged["provider"] = config.provider
-                merged["model"] = config.model
-                merged["basis"] = {
-                    "uses_spec_docx": bool(candidates.get("spec_text")),
-                    "uses_fixed_docx": True,
-                    "uses_rendered_images": True,
-                    "spec_name": Path(str(candidates.get("spec_docx_path") or "")).name if candidates.get("spec_docx_path") else "",
-                    "fixed_docx_name": Path(str(candidates.get("summary", {}).get("fixed_docx", ""))).name,
-                    "reviewed_pages": [p.get("page") for p in reviewed_pages if isinstance(p, dict)],
-                }
-                merged["overall_result"] = merged.get("overall_result", "needs_manual_review")
-                merged["overall_risk"] = merged.get("overall_risk", "medium")
-                merged["safe_edit_plan"] = merged.get("safe_edit_plan", [])
-                merged["manual_review_items"] = merged.get("manual_review_items", [])
-                merged["mode"] = config.mode
-                merged["evidence_source"] = evidence_source
-                merged["vision_status"] = vision_status
-                merged["reviewed_pages"] = reviewed_pages
-                result = {
-                    "enabled": True,
-                    "provider": config.provider,
-                    "model": config.model,
-                    "mode": config.mode,
-                    "evidence_source": evidence_source,
-                    "vision_status": vision_status,
-                    "base_url": config.base_url,
-                    "image_upload_mode": image_upload_mode,
-                    "status": "ok",
-                    "review": merged,
-                }
-        else:
-            evidence_source = "script_summary"
-            vision_status = "not_requested" if config.mode == "text" else "unsupported"
-            image_upload_mode = "fallback_text"
-            result = _invoke([{"role": "system", "content": LLM_REVIEW_SYSTEM_PROMPT}, {"role": "user", "content": _build_llm_user_prompt(candidates, "text", [])}])
-
         if config.output_path is not None:
             config.output_path.parent.mkdir(parents=True, exist_ok=True)
-            config.output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
-        return result
+            config.output_path.write_text(json.dumps(response, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
+        return response
     except Exception as exc:
         return {
             "enabled": True,
             "provider": config.provider,
             "model": config.model,
             "mode": config.mode,
-            "evidence_source": "none",
-            "vision_status": "failed",
             "base_url": config.base_url,
-            "image_upload_mode": "failed",
             "status": "failed",
             "reason": f"api_error:{exc.__class__.__name__}",
         }
-
 
 def run(
     input_path: Path,
@@ -5630,6 +5645,9 @@ def run(
     report["llm_apply_result"] = apply_result
     report["llm_review_json"] = str(llm_review_json_path.resolve())
     report["llm_review_html"] = str(llm_review_html_path.resolve())
+    if isinstance(report.get("llm_review"), dict):
+        report["llm_review"]["llm_fixed_docx"] = report["llm_fixed_docx"]
+        report["llm_review"]["apply_result"] = apply_result
     llm_review_json_path.write_text(json.dumps(report["llm_review"], ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
     if llm_review_config.separate_html:
         write_llm_review_separate_html(report["llm_review"], llm_review_html_path)

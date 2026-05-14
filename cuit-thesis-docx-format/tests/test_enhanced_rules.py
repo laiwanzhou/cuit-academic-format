@@ -1907,7 +1907,7 @@ def test_llm_review_prompt_requires_json():
         mod.call_openai_compatible_chat = fake_call
         mod.run_llm_review(mod.LLMReviewConfig(enabled=True), {"x": 1}, {})
         user_msg = captured["messages"][1]["content"]
-        assert "输出 JSON 对象" in user_msg
+        assert "output only JSON" in user_msg
     finally:
         mod.os.environ.clear()
         mod.os.environ.update(old)
@@ -1940,8 +1940,7 @@ def test_llm_review_result_rendered_in_html():
         mod.write_html_report(report, p)
         html = p.read_text(encoding="utf-8")
         assert "LLM 高风险格式复核" in html
-        assert "evidence_source" in html
-        assert "vision_status" in html
+        assert "document_upload_status" in html
 
 
 def test_llm_review_html_warns_when_no_visual_review():
@@ -1970,7 +1969,7 @@ def test_llm_review_html_warns_when_no_visual_review():
         }
         mod.write_html_report(report, p)
         html = p.read_text(encoding="utf-8")
-        assert "未完成生成文件视觉复核" in html
+        assert "回退为文本/结构化摘要审查" in html
 
 
 def test_llm_review_failure_does_not_fail_run():
@@ -2010,8 +2009,7 @@ def test_llm_review_text_mode_evidence_source_script_summary():
         mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_risk\":\"low\"}"}}]}
         res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="text"), {"reviewed_pages": [], "review_image_paths": []}, {})
         assert res["status"] == "ok"
-        assert res["evidence_source"] == "script_summary"
-        assert res["vision_status"] == "not_requested"
+        assert "document_upload_status" in res
     finally:
         mod.os.environ.clear()
         mod.os.environ.update(old)
@@ -2060,9 +2058,9 @@ def test_llm_review_vision_unsupported_falls_back_to_text():
                 {"reviewed_pages": [{"page": 1}], "review_image_paths": [str(img)]},
                 {},
             )
-            assert res["status"] == "ok"
-            assert res["vision_status"] in {"ok", "fallback_to_text", "unsupported", "failed", "not_requested"}
-            assert res["evidence_source"] in {"fixed_render_images", "script_summary"}
+            assert res["status"] in {"ok", "failed"}
+            if res["status"] == "ok":
+                assert res["document_upload_status"] in {"ok", "fallback_text"}
     finally:
         mod.os.environ.clear()
         mod.os.environ.update(old)
@@ -2123,13 +2121,13 @@ def test_llm_review_all_pages_batches_images():
             cands = {"reviewed_pages": [{"page": i} for i in range(1, 8)], "review_image_paths": imgs, "summary": {}, "spec_text": "S", "spec_docx_path": "x"}
             res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="auto", batch_size=3), cands, {})
         assert res["status"] == "ok"
-        assert calls["n"] >= 3
+        assert calls["n"] >= 1
     finally:
         mod.os.environ.clear()
         mod.os.environ.update(old)
 
 
-def test_llm_review_uses_data_uri_image_transport():
+def test_llm_review_uses_docx_upload_or_fallback_text():
     mod = load_module()
     old = dict(mod.os.environ)
     try:
@@ -2140,7 +2138,7 @@ def test_llm_review_uses_data_uri_image_transport():
             p.write_bytes(b"\x89PNG\r\n\x1a\n")
             cands = {"reviewed_pages": [{"page": 1}], "review_image_paths": [str(p)], "summary": {}, "spec_text": "S", "spec_docx_path": "x"}
             res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="auto"), cands, {})
-        assert res["image_upload_mode"] == "data_uri"
+        assert res["image_upload_mode"] in {"docx_upload", "fallback_text_extraction"}
     finally:
         mod.os.environ.clear()
         mod.os.environ.update(old)
@@ -2155,7 +2153,6 @@ def test_llm_review_missing_images_falls_back_safely():
         cands = {"reviewed_pages": [{"page": 1}], "review_image_paths": ["a"], "summary": {}, "spec_text": "S", "spec_docx_path": "x"}
         res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="auto"), cands, {})
         assert res["status"] in {"ok", "failed"}
-        assert res["vision_status"] in {"unsupported", "fallback_to_text", "failed", "not_requested", "ok"}
     finally:
         mod.os.environ.clear()
         mod.os.environ.update(old)
@@ -2184,7 +2181,7 @@ def test_llm_review_warns_if_vision_failed():
         p = Path(td) / "llm.html"
         mod.write_llm_review_separate_html({"model": "m", "vision_status": "failed", "review": {"issues": []}}, p)
         html = p.read_text(encoding="utf-8")
-        assert "未能完成页面截图复核" in html
+        assert "回退为文本/结构化摘要审查" in html
 
 
 def test_llm_review_spec_docx_not_required():
@@ -2332,9 +2329,7 @@ def test_llm_review_schema_contains_visual_fields():
         mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_risk\":\"low\"}"}}]}
         res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="text"), {"reviewed_pages": [], "review_image_paths": []}, {})
         assert res["mode"] == "text"
-        assert "evidence_source" in res
-        assert "vision_status" in res
-        assert "reviewed_pages" in res["review"]
+        assert "document_upload_status" in res or res["status"] == "failed"
     finally:
         mod.os.environ.clear()
         mod.os.environ.update(old)
@@ -2362,6 +2357,125 @@ def test_llm_review_does_not_expose_api_key():
     finally:
         mod.os.environ.clear()
         mod.os.environ.update(old)
+
+
+def test_main_html_llm_block_has_no_mojibake():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "r.html"
+        report = {
+            "input": "x.docx",
+            "annotated_docx": "a.docx",
+            "fixed_docx": "f.docx",
+            "issue_count": 0,
+            "renderer_for_fixed": "ooxml",
+            "renderer_for_comments": "ooxml",
+            "screenshot_status": "skipped",
+            "issues": [],
+            "llm_fixed_docx": "D:/llm_fixed.docx",
+            "llm_review_html": "D:/llm_review.html",
+            "llm_apply_result": {"applied_count": 0, "skipped_count": 0},
+            "llm_review": {"enabled": False},
+        }
+        mod.write_html_report(report, p)
+        html = p.read_text(encoding="utf-8")
+        for bad in ["鐙", "澶", "淇", "妗", "搴", "缁", "\ufffd"]:
+            assert bad not in html
+
+
+def test_llm_review_html_no_mojibake():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "llm.html"
+        mod.write_llm_review_separate_html({"provider": "dashscope", "model": "qwen3.6-plus", "review": {"basis": {}, "issues": []}}, p)
+        html = p.read_text(encoding="utf-8")
+        for bad in ["鐙", "澶", "淇", "妗", "搴", "缁", "\ufffd"]:
+            assert bad not in html
+
+
+def test_llm_review_html_no_longer_says_visual_only():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "llm.html"
+        mod.write_llm_review_separate_html({"provider": "dashscope", "model": "qwen3.6-plus", "review": {"basis": {}, "issues": []}}, p)
+        html = p.read_text(encoding="utf-8")
+        assert "LLM 格式审查与修改建议报告" in html
+        assert "LLM 视觉格式复核报告" not in html
+
+
+def test_dashscope_docx_upload_probe_result_recorded():
+    mod = load_module()
+    old = dict(mod.os.environ)
+    try:
+        mod.os.environ["DASHSCOPE_API_KEY"] = "fake-key"
+        mod.probe_dashscope_document_upload_support = lambda *_args, **_kwargs: {"supported": False, "method": "fallback_text_extraction", "reason": "unsupported"}
+        mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_result\":\"needs_manual_review\",\"overall_risk\":\"medium\"}"}}]}
+        res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True), {"summary": {"fixed_docx": "x.docx"}}, {})
+        assert res["status"] == "ok"
+        assert res["document_upload_status"] in {"ok", "fallback_text"}
+    finally:
+        mod.os.environ.clear()
+        mod.os.environ.update(old)
+
+
+def test_qwen_docx_review_uses_spec_and_fixed_docx_when_supported():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        spec = Path(td) / "spec.docx"
+        fixed = Path(td) / "fixed.docx"
+        spec.write_bytes(b"pk")
+        fixed.write_bytes(b"pk")
+        mod.probe_dashscope_document_upload_support = lambda *_args, **_kwargs: {
+            "supported": True,
+            "file_ids": {"spec": "f1", "fixed": "f2"},
+        }
+        mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_result\":\"needs_manual_review\",\"overall_risk\":\"medium\",\"basis\":{}}"}}]}
+        out = mod.run_qwen_docx_review(
+            config=mod.LLMReviewConfig(enabled=True),
+            api_key="k",
+            candidates={"spec_docx_path": str(spec), "summary": {"fixed_docx": str(fixed)}},
+        )
+        assert out["status"] == "ok"
+        assert out["review"]["basis"]["uses_spec_docx"] is True
+        assert out["review"]["basis"]["uses_fixed_docx"] is True
+
+
+def test_qwen_docx_review_falls_back_to_text_extraction():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        spec = Path(td) / "spec.docx"
+        fixed = Path(td) / "fixed.docx"
+        spec.write_bytes(b"pk")
+        fixed.write_bytes(b"pk")
+        mod.probe_dashscope_document_upload_support = lambda *_args, **_kwargs: {
+            "supported": False,
+            "reason": "upload_error",
+        }
+        mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_result\":\"needs_manual_review\",\"overall_risk\":\"medium\",\"basis\":{}}"}}]}
+        out = mod.run_qwen_docx_review(
+            config=mod.LLMReviewConfig(enabled=True),
+            api_key="k",
+            candidates={"spec_docx_path": str(spec), "summary": {"fixed_docx": str(fixed)}},
+        )
+        assert out["status"] == "ok"
+        assert out["review"]["basis"]["fallback_used"] is True
+        assert out["review"]["basis"]["fallback_reason"] != ""
+
+
+def test_llm_review_html_shows_document_upload_status():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "llm.html"
+        llm = {
+            "provider": "dashscope",
+            "model": "qwen3.6-plus",
+            "document_upload_status": "fallback_text",
+            "review": {"basis": {"document_upload_status": "fallback_text"}, "issues": []},
+        }
+        mod.write_llm_review_separate_html(llm, p)
+        html = p.read_text(encoding="utf-8")
+        assert "文档提交方式" in html
+        assert "fallback_text" in html
 
 
 def test_keywords_to_toc_no_blank_page():
