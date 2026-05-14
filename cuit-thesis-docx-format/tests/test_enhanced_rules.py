@@ -1858,6 +1858,7 @@ def test_llm_config_prefers_cli_over_env_over_dotenv():
         parser.add_argument("--llm-model", default=None)
         parser.add_argument("--llm-api-key-env", default="DEEPSEEK_API_KEY")
         parser.add_argument("--llm-base-url", default=None)
+        parser.add_argument("--llm-review-mode", choices=["auto", "text", "vision"], default="auto")
         parser.add_argument("--llm-review-max-pages", type=int, default=8)
         parser.add_argument("--llm-review-output", default=None)
         parser.add_argument("--llm-review-timeout", type=int, default=60)
@@ -1920,11 +1921,51 @@ def test_llm_review_result_rendered_in_html():
             "renderer_for_comments": "ooxml",
             "screenshot_status": "skipped",
             "issues": [],
-            "llm_review": {"enabled": True, "status": "ok", "review": {"overall_risk": "low"}},
+            "llm_review": {
+                "enabled": True,
+                "status": "ok",
+                "provider": "deepseek",
+                "model": "deepseek-v4-pro",
+                "mode": "auto",
+                "evidence_source": "script_summary",
+                "vision_status": "fallback_to_text",
+                "review": {"overall_risk": "low", "reviewed_pages": []},
+            },
         }
         mod.write_html_report(report, p)
         html = p.read_text(encoding="utf-8")
         assert "LLM 高风险格式复核" in html
+        assert "evidence_source" in html
+        assert "vision_status" in html
+
+
+def test_llm_review_html_warns_when_no_visual_review():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "r.html"
+        report = {
+            "input": "x.docx",
+            "annotated_docx": "a.docx",
+            "fixed_docx": "f.docx",
+            "issue_count": 0,
+            "renderer_for_fixed": "ooxml",
+            "renderer_for_comments": "ooxml",
+            "screenshot_status": "skipped",
+            "issues": [],
+            "llm_review": {
+                "enabled": True,
+                "status": "ok",
+                "provider": "deepseek",
+                "model": "deepseek-v4-pro",
+                "mode": "text",
+                "evidence_source": "script_summary",
+                "vision_status": "not_requested",
+                "review": {"overall_risk": "low", "reviewed_pages": []},
+            },
+        }
+        mod.write_html_report(report, p)
+        html = p.read_text(encoding="utf-8")
+        assert "未完成生成文件视觉复核" in html
 
 
 def test_llm_review_failure_does_not_fail_run():
@@ -1947,6 +1988,28 @@ def test_llm_review_uses_deepseek_defaults():
     assert cfg.provider == "deepseek"
     assert cfg.model == "deepseek-v4-pro"
     assert cfg.api_key_env == "DEEPSEEK_API_KEY"
+    assert cfg.mode == "auto"
+
+
+def test_llm_review_mode_defaults_auto():
+    mod = load_module()
+    cfg = mod.LLMReviewConfig()
+    assert cfg.mode == "auto"
+
+
+def test_llm_review_text_mode_evidence_source_script_summary():
+    mod = load_module()
+    old = dict(mod.os.environ)
+    try:
+        mod.os.environ["DEEPSEEK_API_KEY"] = "fake-key"
+        mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_risk\":\"low\"}"}}]}
+        res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="text"), {"reviewed_pages": [], "review_image_paths": []}, {})
+        assert res["status"] == "ok"
+        assert res["evidence_source"] == "script_summary"
+        assert res["vision_status"] == "not_requested"
+    finally:
+        mod.os.environ.clear()
+        mod.os.environ.update(old)
 
 
 def test_parse_llm_review_response_markdown_json_block():
@@ -1964,6 +2027,73 @@ def test_collect_llm_review_candidates_table_and_toc_schema():
     c = mod.collect_llm_review_candidates({"issue_summary_by_category": {}}, issues, Path("a.docx"), None, mod.LLMReviewConfig())
     assert c["toc_manual_review"]["toc_page_number_manual_review"] is True
     assert len(c["table_risks"]) == 1
+
+
+def test_llm_review_does_not_send_more_than_max_pages():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        img1 = Path(td) / "a.png"
+        img2 = Path(td) / "b.png"
+        img1.write_bytes(b"\x89PNG\r\n\x1a\n")
+        img2.write_bytes(b"\x89PNG\r\n\x1a\n")
+        report = {"render_qa": {"pages": [{"page": 1, "after": str(img1)}, {"page": 2, "after": str(img2)}]}}
+        c = mod.collect_llm_review_candidates(report, [], Path("a.docx"), None, mod.LLMReviewConfig(max_pages=1))
+        assert len(c["reviewed_pages"]) == 1
+
+
+def test_llm_review_vision_unsupported_falls_back_to_text():
+    mod = load_module()
+    old = dict(mod.os.environ)
+    try:
+        mod.os.environ["DEEPSEEK_API_KEY"] = "fake-key"
+        with tempfile.TemporaryDirectory() as td:
+            img = Path(td) / "a.png"
+            img.write_bytes(b"\x89PNG\r\n\x1a\n")
+            calls = {"n": 0}
+            def fake_call(**kwargs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise RuntimeError("unsupported image_url")
+                return {"choices": [{"message": {"content": "{\"overall_risk\":\"low\"}"}}]}
+            mod.call_openai_compatible_chat = fake_call
+            res = mod.run_llm_review(
+                mod.LLMReviewConfig(enabled=True, mode="auto"),
+                {"reviewed_pages": [{"page": 1}], "review_image_paths": [str(img)]},
+                {},
+            )
+            assert res["status"] == "ok"
+            assert res["vision_status"] == "fallback_to_text"
+            assert res["evidence_source"] == "script_summary"
+    finally:
+        mod.os.environ.clear()
+        mod.os.environ.update(old)
+
+
+def test_llm_review_payload_includes_candidate_pages_when_images_available():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        img = Path(td) / "a.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n")
+        report = {"render_qa": {"pages": [{"page": 2, "after": str(img)}]}}
+        c = mod.collect_llm_review_candidates(report, [], Path("a.docx"), None, mod.LLMReviewConfig(max_pages=8))
+        assert c["reviewed_pages"]
+        assert c["review_image_paths"]
+
+
+def test_llm_review_schema_contains_visual_fields():
+    mod = load_module()
+    old = dict(mod.os.environ)
+    try:
+        mod.os.environ["DEEPSEEK_API_KEY"] = "fake-key"
+        mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_risk\":\"low\"}"}}]}
+        res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="text"), {"reviewed_pages": [], "review_image_paths": []}, {})
+        assert res["mode"] == "text"
+        assert "evidence_source" in res
+        assert "vision_status" in res
+        assert "reviewed_pages" in res["review"]
+    finally:
+        mod.os.environ.clear()
+        mod.os.environ.update(old)
 
 
 def test_llm_review_does_not_expose_api_key():

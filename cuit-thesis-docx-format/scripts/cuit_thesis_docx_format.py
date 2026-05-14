@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from copy import deepcopy
 import html
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -147,6 +149,7 @@ class LLMReviewConfig:
     base_url: str = "https://api.deepseek.com"
     max_pages: int = 8
     timeout: int = 60
+    mode: str = "auto"
     output_path: Path | None = None
 
 
@@ -207,6 +210,7 @@ def resolve_llm_review_config(args: argparse.Namespace, dotenv: dict[str, str]) 
         base_url=get_config_value("DEEPSEEK_BASE_URL", args.llm_base_url, env, dotenv, "https://api.deepseek.com"),
         max_pages=_safe_positive_int(get_config_value("LLM_REVIEW_MAX_PAGES", str(args.llm_review_max_pages), env, dotenv, "8"), 8),
         timeout=_safe_positive_int(get_config_value("LLM_REVIEW_TIMEOUT", str(args.llm_review_timeout), env, dotenv, "60"), 60),
+        mode=args.llm_review_mode,
         output_path=Path(args.llm_review_output) if args.llm_review_output else None,
     )
 
@@ -4661,12 +4665,26 @@ def write_html_report(report: dict[str, object], path: Path) -> None:
             llm_block.append("<p>未启用 LLM 高风险格式复核。</p>")
         elif llm_status == "skipped" and llm.get("reason") == "missing_api_key":
             llm_block.append("<p>已请求 LLM 复核，但未配置 DEEPSEEK_API_KEY，因此已跳过。</p>")
-        elif llm_status == "ok" and isinstance(llm.get("review"), dict):
-            review = llm["review"]
-            llm_block.append(f"<p><strong>overall_risk：</strong>{html.escape(str(review.get('overall_risk', '')))}</p>")
-            llm_block.append(f"<pre>{html.escape(json.dumps(review, ensure_ascii=False, indent=2))}</pre>")
         elif llm_status:
-            llm_block.append(f"<p>LLM 复核执行失败：{html.escape(str(llm.get('reason', llm_status)))}</p>")
+            llm_block.append(
+                f"<p><strong>provider/model：</strong>{html.escape(str(llm.get('provider', '')))} / {html.escape(str(llm.get('model', '')))}</p>"
+                f"<p><strong>mode：</strong>{html.escape(str(llm.get('mode', '')))}</p>"
+                f"<p><strong>evidence_source：</strong>{html.escape(str(llm.get('evidence_source', 'none')))}</p>"
+                f"<p><strong>vision_status：</strong>{html.escape(str(llm.get('vision_status', '')))}</p>"
+            )
+            if llm_status == "ok" and isinstance(llm.get("review"), dict):
+                review = llm["review"]
+                pages = review.get("reviewed_pages", [])
+                llm_block.append(f"<p><strong>overall_risk：</strong>{html.escape(str(review.get('overall_risk', '')))}</p>")
+                if isinstance(pages, list) and pages:
+                    llm_block.append(f"<p><strong>reviewed_pages：</strong>{html.escape(json.dumps(pages, ensure_ascii=False))}</p>")
+                if llm.get("vision_status") == "ok":
+                    llm_block.append("<p><strong>本次 LLM 已基于生成文件页面截图进行复核。</strong></p>")
+                else:
+                    llm_block.append("<p><strong>本次未完成生成文件视觉复核，LLM 结果仅基于脚本摘要，不能判断真实空白页、目录页脚页码或三线表视觉效果。</strong></p>")
+                llm_block.append(f"<pre>{html.escape(json.dumps(review, ensure_ascii=False, indent=2))}</pre>")
+            else:
+                llm_block.append(f"<p>LLM 复核执行失败：{html.escape(str(llm.get('reason', llm_status)))}</p>")
         llm_block.append("</section>")
         llm_html = "".join(llm_block)
     else:
@@ -4829,6 +4847,63 @@ def _truncate_text(value: object, limit: int = 240) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
+def _collect_reviewed_pages(report: dict[str, object], issues: list[Issue], max_pages: int) -> list[dict[str, object]]:
+    pages: list[dict[str, object]] = []
+    seen: set[str] = set()
+    render_qa = report.get("render_qa") if isinstance(report.get("render_qa"), dict) else {}
+    for page_obj in render_qa.get("pages", []) if isinstance(render_qa, dict) else []:
+        if not isinstance(page_obj, dict):
+            continue
+        after_img = page_obj.get("after")
+        if not after_img:
+            continue
+        page_no = page_obj.get("page")
+        dedupe_key = f"render:{page_no}"
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        pages.append(
+            {
+                "page": page_no if isinstance(page_no, int) else "unknown",
+                "reason": "fixed render page",
+                "checks": ["blank_page", "toc_start", "toc_page_number", "table_three_line", "figure_near_caption"],
+                "image_path": str(after_img),
+            }
+        )
+        if len(pages) >= max_pages:
+            return pages
+    for issue in issues:
+        if len(pages) >= max_pages:
+            break
+        issue_img = issue.after_screenshot or issue.before_screenshot
+        if not issue_img:
+            continue
+        dedupe_key = f"issue:{issue_img}"
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        pages.append(
+            {
+                "page": issue.page if issue.page is not None else "unknown",
+                "reason": issue.rule_key,
+                "checks": ["table_three_line"] if issue.category == "table" else ["figure_near_caption"] if issue.category == "image" else ["blank_page"] if issue.category == "page" else ["format_risk"],
+                "image_path": str(issue_img),
+            }
+        )
+    return pages[:max_pages]
+
+
+def _image_to_data_uri(path_str: str) -> str:
+    path = Path(path_str)
+    mime = mimetypes.guess_type(path.name)[0] or "image/png"
+    return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+
+
+def _is_vision_unsupported_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(token in text for token in ["image_url", "multimodal", "vision", "unsupported", "content type", "invalid content"])
+
+
 def collect_llm_review_candidates(
     report: dict[str, object],
     issues: list[Issue],
@@ -4836,6 +4911,7 @@ def collect_llm_review_candidates(
     screenshots_dir: Path | None,
     config: LLMReviewConfig,
 ) -> dict[str, object]:
+    reviewed_pages = _collect_reviewed_pages(report, issues, config.max_pages)
     issue_dicts = [issue_dict(issue) for issue in issues]
     table_items = [item for item in issue_dicts if "table" in str(item.get("rule_key", "")) or str(item.get("category", "")) == "table"]
     figure_items = [item for item in issue_dicts if "figure" in str(item.get("rule_key", "")) or str(item.get("category", "")) == "image"]
@@ -4845,6 +4921,8 @@ def collect_llm_review_candidates(
     ref272_entries = [e for e in ref272.get("entries", []) if isinstance(e, dict) and e.get("status") != "matched"] if isinstance(ref272, dict) else []
     ref273_entries = [e for e in ref273.get("entries", []) if isinstance(e, dict)] if isinstance(ref273, dict) else []
     return {
+        "reviewed_pages": [{k: v for k, v in page.items() if k != "image_path"} for page in reviewed_pages],
+        "review_image_paths": [str(page["image_path"]) for page in reviewed_pages if page.get("image_path")],
         "summary": {
             "issue_summary_by_category": report.get("issue_summary_by_category", {}),
             "layout_fix_policy": report.get("layout_fix_policy", {}),
@@ -4893,6 +4971,28 @@ def _extract_chat_content(payload: dict) -> str:
     return str(msg.get("content") or "")
 
 
+def _build_llm_user_prompt(candidates: dict[str, object], mode: str) -> str:
+    return (
+        "请仅输出 JSON 对象，严格符合以下 schema："
+        '{"llm_review_version":"1.1","provider":"deepseek","model":"deepseek-v4-pro","mode":"auto|text|vision","evidence_source":"fixed_render_images|script_summary|mixed|none","vision_status":"ok|fallback_to_text|unsupported|failed|not_requested","reviewed_pages":[{"page":"number or unknown","reason":"string","checks":["string"]}],"overall_risk":"low|medium|high",'
+        '"blank_page_review":[{"page":"number or unknown","status":"ok|suspected_blank_page|manual_review_needed|not_sure","evidence":"string","suggestion":"string"}],'
+        '"toc_review":{"status":"ok|manual_review_needed|not_sure","toc_entry_page_numbers":"arabic|wrong|not_sure","toc_footer_page_number":"lower_roman|arabic|wrong|not_sure","toc_starts_new_page":"yes|no|not_sure","evidence":"string","suggestion":"string"},'
+        '"table_review":[{"page":"number or unknown","table_label":"string","status":"ok|not_three_line_table|manual_review_needed|not_sure","evidence":"string","suggestion":"string"}],'
+        '"figure_review":[{"page":"number or unknown","caption":"string","status":"ok|image_missing_near_caption|manual_review_needed|not_sure","evidence":"string","suggestion":"string"}],'
+        '"reference_review":[{"entry_index":"string","status":"ok|manual_review_needed|not_sure","evidence":"string","suggestion":"string"}],"notes":["string"]}。'
+        f"当前模式：{mode}。候选摘要JSON如下：\n{json.dumps(candidates, ensure_ascii=False)}"
+    )
+
+
+def _ensure_visual_fields(review: dict[str, object], mode: str, evidence_source: str, vision_status: str, reviewed_pages: list[dict[str, object]]) -> dict[str, object]:
+    review.setdefault("llm_review_version", "1.1")
+    review.setdefault("mode", mode)
+    review.setdefault("evidence_source", evidence_source)
+    review.setdefault("vision_status", vision_status)
+    review.setdefault("reviewed_pages", reviewed_pages)
+    return review
+
+
 def run_llm_review(config: LLMReviewConfig, candidates: dict[str, object], dotenv_values: dict[str, str] | None = None) -> dict[str, object]:
     if not config.enabled:
         return {"enabled": False}
@@ -4903,44 +5003,91 @@ def run_llm_review(config: LLMReviewConfig, candidates: dict[str, object], doten
             "enabled": True,
             "provider": config.provider,
             "model": config.model,
+            "mode": config.mode,
+            "evidence_source": "none",
+            "vision_status": "not_requested",
             "base_url": config.base_url,
             "status": "skipped",
             "reason": "missing_api_key",
         }
-    user_prompt = (
-        "请仅输出 JSON 对象，严格符合以下 schema："
-        '{"llm_review_version":"1.0","provider":"deepseek","model":"deepseek-v4-pro","overall_risk":"low|medium|high",'
-        '"blank_page_review":[{"target":"abstract_to_toc|toc_to_body|body_heading|unknown","status":"ok|suspected_blank_page|manual_review_needed|not_sure","evidence":"string","suggestion":"string"}],'
-        '"toc_review":{"status":"ok|manual_review_needed|not_sure","toc_entry_page_numbers":"arabic|wrong|not_sure","toc_footer_page_number":"lower_roman|arabic|wrong|not_sure","toc_starts_new_page":"yes|no|not_sure","evidence":"string","suggestion":"string"},'
-        '"table_review":[{"table_label":"string","status":"ok|not_three_line_table|manual_review_needed|not_sure","evidence":"string","suggestion":"string"}],'
-        '"figure_review":[{"caption":"string","status":"ok|image_missing_near_caption|manual_review_needed|not_sure","evidence":"string","suggestion":"string"}],'
-        '"reference_review":[{"entry_index":"string","status":"ok|manual_review_needed|not_sure","evidence":"string","suggestion":"string"}],'
-        '"notes":["string"]}。'
-        f"候选摘要JSON如下：\n{json.dumps(candidates, ensure_ascii=False)}"
-    )
-    try:
+
+    reviewed_pages = candidates.get("reviewed_pages", []) if isinstance(candidates.get("reviewed_pages"), list) else []
+    image_paths = [p for p in candidates.get("review_image_paths", []) if isinstance(p, str)] if isinstance(candidates, dict) else []
+    text_prompt = _build_llm_user_prompt(candidates, config.mode)
+    prefer_vision = config.mode in {"auto", "vision"} and bool(image_paths)
+    evidence_source = "script_summary"
+    vision_status = "not_requested" if config.mode == "text" else "failed"
+
+    def _invoke(messages: list[dict[str, object]]) -> dict[str, object]:
         payload = call_openai_compatible_chat(
             base_url=config.base_url,
             api_key=api_key,
             model=config.model,
-            messages=[
-                {"role": "system", "content": LLM_REVIEW_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
+            messages=messages,
             timeout=config.timeout,
         )
-        text = _extract_chat_content(payload)
-        parsed = parse_llm_review_response(text)
+        parsed = parse_llm_review_response(_extract_chat_content(payload))
         if parsed.get("status") == "failed":
-            return {"enabled": True, "provider": config.provider, "model": config.model, "base_url": config.base_url, **parsed}
-        result: dict[str, object] = {
+            return {
+                "enabled": True,
+                "provider": config.provider,
+                "model": config.model,
+                "mode": config.mode,
+                "evidence_source": evidence_source,
+                "vision_status": vision_status,
+                "base_url": config.base_url,
+                **parsed,
+            }
+        review = _ensure_visual_fields(parsed, config.mode, evidence_source, vision_status, reviewed_pages)
+        return {
             "enabled": True,
             "provider": config.provider,
             "model": config.model,
+            "mode": config.mode,
+            "evidence_source": evidence_source,
+            "vision_status": vision_status,
             "base_url": config.base_url,
             "status": "ok",
-            "review": parsed,
+            "review": review,
         }
+
+    try:
+        if prefer_vision:
+            vision_content: list[dict[str, object]] = [{"type": "text", "text": text_prompt}]
+            for idx, image_path in enumerate(image_paths[: config.max_pages]):
+                page_meta = reviewed_pages[idx] if idx < len(reviewed_pages) and isinstance(reviewed_pages[idx], dict) else {}
+                vision_content.append(
+                    {
+                        "type": "text",
+                        "text": f"page={page_meta.get('page', 'unknown')}; reason={page_meta.get('reason', '')}; checks={page_meta.get('checks', [])}",
+                    }
+                )
+                vision_content.append({"type": "image_url", "image_url": {"url": _image_to_data_uri(image_path)}})
+            evidence_source = "fixed_render_images"
+            vision_status = "ok"
+            try:
+                result = _invoke([{"role": "system", "content": LLM_REVIEW_SYSTEM_PROMPT}, {"role": "user", "content": vision_content}])
+            except Exception as exc:
+                if config.mode == "vision":
+                    return {
+                        "enabled": True,
+                        "provider": config.provider,
+                        "model": config.model,
+                        "mode": config.mode,
+                        "evidence_source": "none",
+                        "vision_status": "unsupported" if _is_vision_unsupported_error(exc) else "failed",
+                        "base_url": config.base_url,
+                        "status": "failed",
+                        "reason": f"api_error:{exc.__class__.__name__}",
+                    }
+                evidence_source = "script_summary"
+                vision_status = "fallback_to_text" if _is_vision_unsupported_error(exc) else "failed"
+                result = _invoke([{"role": "system", "content": LLM_REVIEW_SYSTEM_PROMPT}, {"role": "user", "content": text_prompt}])
+        else:
+            evidence_source = "script_summary"
+            vision_status = "not_requested" if config.mode == "text" else "unsupported"
+            result = _invoke([{"role": "system", "content": LLM_REVIEW_SYSTEM_PROMPT}, {"role": "user", "content": text_prompt}])
+
         if config.output_path is not None:
             config.output_path.parent.mkdir(parents=True, exist_ok=True)
             config.output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
@@ -4950,6 +5097,9 @@ def run_llm_review(config: LLMReviewConfig, candidates: dict[str, object], doten
             "enabled": True,
             "provider": config.provider,
             "model": config.model,
+            "mode": config.mode,
+            "evidence_source": "none",
+            "vision_status": "failed",
             "base_url": config.base_url,
             "status": "failed",
             "reason": f"api_error:{exc.__class__.__name__}",
@@ -5156,6 +5306,7 @@ def main() -> int:
     parser.add_argument("--llm-model", default=None, help="LLM model name, default deepseek-v4-pro.")
     parser.add_argument("--llm-api-key-env", default="DEEPSEEK_API_KEY", help="Environment variable name for API key.")
     parser.add_argument("--llm-base-url", default=None, help="OpenAI-compatible base URL.")
+    parser.add_argument("--llm-review-mode", choices=["auto", "text", "vision"], default="auto", help="LLM review mode.")
     parser.add_argument("--llm-review-max-pages", type=int, default=8, help="Max candidate item count for review.")
     parser.add_argument("--llm-review-output", default=None, help="Optional path to save raw LLM review JSON.")
     parser.add_argument("--llm-review-timeout", type=int, default=60, help="LLM request timeout seconds.")
