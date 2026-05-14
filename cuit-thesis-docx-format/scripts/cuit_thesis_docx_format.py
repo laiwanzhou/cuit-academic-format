@@ -756,6 +756,21 @@ def run_format_summary(run, paragraph) -> str:
     )
 
 
+def normalize_font_name(name: str | None) -> str | None:
+    if name is None:
+        return None
+    text = str(name).strip()
+    if not text:
+        return None
+    lowered = re.sub(r"\s+", " ", text).strip().lower()
+    lowered = re.sub(r"\s+regular$", "", lowered)
+    if lowered in {"times new roman", "timesnewroman"}:
+        return "Times New Roman"
+    if lowered in {"simsun", "songti", "宋体"}:
+        return "宋体"
+    return text
+
+
 def run_matches_rule(run, paragraph, rule: Rule) -> bool:
     text = run.text.strip()
     if not text:
@@ -765,9 +780,13 @@ def run_matches_rule(run, paragraph, rule: Rule) -> bool:
         return False
     if rule.bold is not None and fmt["bold"] is not rule.bold:
         return False
-    if contains_cjk(text) and fmt["eastAsia"] and fmt["eastAsia"] != rule.font_east_asia:
+    actual_east = normalize_font_name(fmt["eastAsia"])
+    expected_east = normalize_font_name(rule.font_east_asia)
+    if contains_cjk(text) and actual_east and actual_east != expected_east:
         return False
-    if contains_latin_or_digit(text) and fmt["ascii"] and fmt["ascii"] != rule.font_ascii:
+    actual_ascii = normalize_font_name(fmt["ascii"])
+    expected_ascii = normalize_font_name(rule.font_ascii)
+    if contains_latin_or_digit(text) and actual_ascii and actual_ascii != expected_ascii:
         return False
     return True
 
@@ -3693,16 +3712,58 @@ def _short_expected_items(issue: Issue) -> list[str]:
     return [issue.expected]
 
 
+def _extract_summary_items(text: str) -> list[str]:
+    return [p.strip(" ；;。") for p in re.split(r"[;\n]|；", text) if p.strip()]
+
+
+def _extract_run_problem_items(current: str) -> list[str]:
+    items: list[str] = []
+    parts = [part.strip() for part in current.split(" | ") if part.strip()]
+    for part in parts:
+        if part.startswith("... +"):
+            continue
+        segments = _extract_summary_items(part)
+        segment_map: dict[str, str] = {}
+        for seg in segments:
+            if "=" in seg:
+                key, value = seg.split("=", 1)
+                segment_map[key.strip()] = value.strip().strip("'")
+        east = segment_map.get("中文字体")
+        if east and east != "继承/未直接设置":
+            items.append(f"中文字体当前为 {east}，建议核对是否符合规则要求。")
+        ascii_font = segment_map.get("西文字体")
+        norm_ascii = normalize_font_name(ascii_font)
+        if ascii_font and ascii_font != "继承/未直接设置" and norm_ascii != "Times New Roman":
+            items.append(f"西文字体当前为 {ascii_font}，建议核对是否符合规则要求。")
+    if not items:
+        return ["检测到该段可能不符合规范，建议人工复核。"]
+    # 去重并保持顺序
+    unique: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if item not in seen:
+            unique.append(item)
+            seen.add(item)
+    return unique
+
+
 def _issue_problem_lines(current: str | None) -> list[str]:
     text = (current or "").strip()
     if not text:
         return ["检测到该段可能不符合规范，建议人工复核。"]
-    text = text.replace("文字片段=", "片段=").replace("中文字体=", "中文字体为 ").replace("西文字体=", "西文字体为 ")
-    compact = text.replace("\r", "\n")
-    pieces = [p.strip(" ；;。") for p in re.split(r"[;\n]|；", compact) if p.strip()]
-    if not pieces:
-        return [text]
-    return pieces
+    if "疑似不符合项：" in text:
+        tail = text.split("疑似不符合项：", 1)[1]
+        stop_markers = ["; 段落样式：", "；段落样式：", ";段落样式：", "； 段落样式："]
+        cut = tail
+        for marker in stop_markers:
+            if marker in cut:
+                cut = cut.split(marker, 1)[0]
+        diffs = _extract_summary_items(cut)
+        return diffs or ["检测到该段可能不符合规范，建议人工复核。"]
+    if "文字片段=" in text:
+        return _extract_run_problem_items(text)
+    plain = _extract_summary_items(text.replace("\r", "\n"))
+    return plain if plain else ["检测到该段可能不符合规范，建议人工复核。"]
 
 
 def comment_message_for_issue(issue: Issue) -> str:

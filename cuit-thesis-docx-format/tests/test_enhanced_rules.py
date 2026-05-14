@@ -228,6 +228,88 @@ def test_comment_text_does_not_list_correct_items_as_errors():
     assert "字体" not in text
 
 
+def test_issue_message_only_lists_actual_differences():
+    mod = load_module()
+    issue = mod.Issue(
+        paragraph_index=1,
+        rule_key="title_zh",
+        text_type="title",
+        text_excerpt="题目",
+        current="疑似不符合项：固定行距：当前 继承/未直接设置，应为 20.0磅; 段落样式：Normal; 中文字体：黑体; 字号：16.0pt; 加粗：是; 对齐方式：居中",
+        expected="中文论文题目应为宋体三号 16pt，加粗，居中，固定 20 磅行距。",
+        message="",
+        category="title",
+    )
+    text = mod.comment_message_for_issue(issue)
+    assert "固定行距：当前 继承/未直接设置，应为 20.0磅" in text
+    assert "字号：16.0pt" not in text
+    assert "加粗：是" not in text
+    assert "对齐方式：居中" not in text
+    assert "段落样式：Normal" not in text
+
+
+def test_issue_message_extracts_multiple_differences_before_summary():
+    mod = load_module()
+    issue = mod.Issue(
+        paragraph_index=1,
+        rule_key="title_zh",
+        text_type="title",
+        text_excerpt="题目",
+        current="疑似不符合项：中文字体：当前 黑体，应为 宋体；固定行距：当前 继承/未直接设置，应为 20.0磅; 段落样式：Normal; 字号：16.0pt",
+        expected="中文论文题目应为宋体三号 16pt，加粗，居中，固定 20 磅行距。",
+        message="",
+        category="title",
+    )
+    text = mod.comment_message_for_issue(issue)
+    assert "中文字体：当前 黑体，应为 宋体" in text
+    assert "固定行距：当前 继承/未直接设置，应为 20.0磅" in text
+    assert "字号：16.0pt" not in text
+    assert "段落样式：Normal" not in text
+
+
+def test_times_new_roman_regular_normalized():
+    mod = load_module()
+    assert mod.normalize_font_name("Times New Roman Regular") == "Times New Roman"
+    assert mod.normalize_font_name("Times New Roman") == "Times New Roman"
+
+
+def test_run_formatting_does_not_list_correct_size_bold_alignment():
+    mod = load_module()
+    issue = mod.Issue(
+        paragraph_index=1,
+        rule_key="title_zh_runs",
+        text_type="title run formatting",
+        text_excerpt="题目",
+        current="文字片段='题目'；中文字体=黑体；西文字体=Times New Roman Regular；字号=16.0pt；加粗=是",
+        expected="中文论文题目应为宋体三号 16pt，加粗，居中，固定 20 磅行距。",
+        message="",
+        category="run-format",
+    )
+    text = mod.comment_message_for_issue(issue)
+    assert "中文字体当前为 黑体" in text
+    assert "字号=16.0pt" not in text
+    assert "加粗=是" not in text
+
+
+def test_comment_for_chinese_title_matches_expected_problem_count():
+    mod = load_module()
+    issue = mod.Issue(
+        paragraph_index=1,
+        rule_key="title_zh",
+        text_type="title",
+        text_excerpt="题目",
+        current="疑似不符合项：中文字体：当前 黑体，应为 宋体；固定行距：当前 继承/未直接设置，应为 20.0磅; 段落样式：Normal; 字号：16.0pt; 加粗：是",
+        expected="中文论文题目应为宋体三号 16pt，加粗，居中，固定 20 磅行距。",
+        message="",
+        category="title",
+    )
+    text = mod.comment_message_for_issue(issue)
+    assert text.count("\n1. ") == 1
+    assert text.count("\n2. ") == 1
+    assert "字号：16.0pt" not in text
+    assert "加粗：是" not in text
+
+
 def test_html_issue_includes_expected_and_actual_problems():
     mod = load_module()
     with tempfile.TemporaryDirectory() as td:
