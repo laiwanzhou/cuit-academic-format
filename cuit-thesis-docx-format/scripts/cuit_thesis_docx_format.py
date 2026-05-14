@@ -143,10 +143,10 @@ class Issue:
 @dataclass(frozen=True)
 class LLMReviewConfig:
     enabled: bool = False
-    provider: str = "deepseek"
-    model: str = "deepseek-v4-pro"
-    api_key_env: str = "DEEPSEEK_API_KEY"
-    base_url: str = "https://api.deepseek.com"
+    provider: str = "dashscope"
+    model: str = "qwen3.6-plus"
+    api_key_env: str = "DASHSCOPE_API_KEY"
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     max_pages: int = 8
     timeout: int = 60
     mode: str = "auto"
@@ -155,6 +155,7 @@ class LLMReviewConfig:
     batch_size: int = 6
     separate_html: bool = True
     image_upload: bool = True
+    image_transport: str = "data_uri"
     output_path: Path | None = None
 
 
@@ -211,10 +212,10 @@ def resolve_llm_review_config(args: argparse.Namespace, dotenv: dict[str, str]) 
     spec_path = Path(args.llm_review_spec_docx) if args.llm_review_spec_docx else (default_spec if default_spec.exists() else None)
     return LLMReviewConfig(
         enabled=bool(args.llm_review),
-        provider=get_config_value("LLM_PROVIDER", args.llm_provider, env, dotenv, "deepseek"),
-        model=get_config_value("DEEPSEEK_MODEL", args.llm_model, env, dotenv, "deepseek-v4-pro"),
-        api_key_env=args.llm_api_key_env,
-        base_url=get_config_value("DEEPSEEK_BASE_URL", args.llm_base_url, env, dotenv, "https://api.deepseek.com"),
+        provider=get_config_value("LLM_PROVIDER", args.llm_provider, env, dotenv, "dashscope"),
+        model=get_config_value("DASHSCOPE_MODEL", args.llm_model, env, dotenv, "qwen3.6-plus"),
+        api_key_env=args.llm_api_key_env or "DASHSCOPE_API_KEY",
+        base_url=get_config_value("DASHSCOPE_BASE_URL", args.llm_base_url, env, dotenv, "https://dashscope.aliyuncs.com/compatible-mode/v1"),
         max_pages=_safe_positive_int(get_config_value("LLM_REVIEW_MAX_PAGES", str(args.llm_review_max_pages), env, dotenv, "8"), 8),
         timeout=_safe_positive_int(get_config_value("LLM_REVIEW_TIMEOUT", str(args.llm_review_timeout), env, dotenv, "60"), 60),
         mode=args.llm_review_mode,
@@ -223,6 +224,7 @@ def resolve_llm_review_config(args: argparse.Namespace, dotenv: dict[str, str]) 
         batch_size=max(1, int(args.llm_review_batch_size)),
         separate_html=not bool(args.llm_review_no_separate_html),
         image_upload=bool(args.llm_review_image_upload),
+        image_transport=getattr(args, "llm_review_image_transport", "data_uri"),
         output_path=Path(args.llm_review_output) if args.llm_review_output else None,
     )
 
@@ -4674,11 +4676,19 @@ def write_html_report(report: dict[str, object], path: Path) -> None:
             "<p>该部分由大语言模型根据脚本诊断摘要辅助复核，仅作为人工检查参考；不会自动修改文档。</p>",
         ]
         if report.get("llm_review_html"):
-            llm_block.append(f"<p><strong>独立 LLM 复核报告：</strong>{html.escape(str(report.get('llm_review_html')))}</p>")
+            llm_block.append(f"<p><strong>鐙珛 LLM 澶嶆牳鎶ュ憡锛?/strong>{html.escape(str(report.get('llm_review_html')))}</p>")
+        if report.get("llm_fixed_docx"):
+            llm_block.append(f"<p><strong>LLM 淇敼鍚庢枃妗ｏ紙llm_fixed锛夛細</strong>{html.escape(str(report.get('llm_fixed_docx')))}</p>")
+        if isinstance(report.get("llm_apply_result"), dict):
+            apply_result = report["llm_apply_result"]
+            llm_block.append(
+                f"<p><strong>safe_edit_plan 搴旂敤缁熻锛?/strong>applied={html.escape(str(apply_result.get('applied_count', 0)))}, "
+                f"skipped={html.escape(str(apply_result.get('skipped_count', 0)))}</p>"
+            )
         if llm.get("enabled") is False:
             llm_block.append("<p>未启用 LLM 高风险格式复核。</p>")
         elif llm_status == "skipped" and llm.get("reason") == "missing_api_key":
-            llm_block.append("<p>已请求 LLM 复核，但未配置 DEEPSEEK_API_KEY，因此已跳过。</p>")
+            llm_block.append("<p>已请求 LLM 复核，但未配置 DASHSCOPE_API_KEY，因此已跳过。</p>")
         elif llm_status:
             llm_block.append(
                 f"<p><strong>provider/model：</strong>{html.escape(str(llm.get('provider', '')))} / {html.escape(str(llm.get('model', '')))}</p>"
@@ -4922,6 +4932,114 @@ def extract_spec_docx_text(spec_path: Path) -> str:
     return text
 
 
+def extract_fixed_docx_structure_for_llm(fixed_docx: Path) -> dict[str, object]:
+    if not fixed_docx.exists():
+        return {
+            "paragraphs": [],
+            "headings": [],
+            "figure_captions": [],
+            "table_captions": [],
+            "references": [],
+            "table_count": 0,
+            "image_count": 0,
+        }
+    doc = Document(str(fixed_docx))
+    paragraphs: list[dict[str, object]] = []
+    heading_candidates: list[dict[str, object]] = []
+    for i, p in enumerate(doc.paragraphs):
+        txt = re.sub(r"\s+", " ", paragraph_text(p)).strip()
+        if not txt:
+            continue
+        style_name = getattr(getattr(p, "style", None), "name", "") or ""
+        item = {"index": i, "text_excerpt": txt[:120], "style": style_name}
+        paragraphs.append(item)
+        if re.match(r"^\d+(\.\d+)*\s*", txt) or "标题" in style_name.lower():
+            heading_candidates.append(item)
+    references = [x for x in paragraphs if re.match(r"^\[\d+\]", str(x["text_excerpt"]))]
+    captions_figure = [x for x in paragraphs if str(x["text_excerpt"]).startswith("图")]
+    captions_table = [x for x in paragraphs if str(x["text_excerpt"]).startswith("表")]
+    return {
+        "paragraphs": paragraphs[:200],
+        "headings": heading_candidates[:80],
+        "figure_captions": captions_figure[:80],
+        "table_captions": captions_table[:80],
+        "references": references[:200],
+        "table_count": len(getattr(doc, "tables", [])),
+        "image_count": count_document_images(doc),
+    }
+
+
+def apply_llm_safe_edit_plan(fixed_docx: Path, edit_plan: list[dict[str, object]], output_path: Path) -> dict[str, object]:
+    if not fixed_docx.exists():
+        if not output_path.exists():
+            output_path.write_bytes(b"")
+        return {"applied_count": 0, "skipped_count": len(edit_plan), "skipped_reasons": ["fixed_docx_missing"]}
+    shutil.copyfile(fixed_docx, output_path)
+    doc = Document(str(output_path))
+    applied = 0
+    skipped = 0
+    skipped_reasons: list[str] = []
+    high_risk_ops = {"section", "toc", "page_field", "page_number", "image_position", "table_border", "page_break", "header_footer"}
+    for item in edit_plan:
+        if not isinstance(item, dict):
+            skipped += 1
+            skipped_reasons.append("invalid_plan_item")
+            continue
+        op = str(item.get("operation", ""))
+        if any(token in op for token in high_risk_ops):
+            skipped += 1
+            skipped_reasons.append(f"high_risk:{op}")
+            continue
+        if op == "manual_review":
+            skipped += 1
+            skipped_reasons.append("manual_review")
+            continue
+        hint = str(item.get("target_hint", ""))
+        params = item.get("parameters", {}) if isinstance(item.get("parameters"), dict) else {}
+        target = None
+        for p in doc.paragraphs:
+            if hint and hint in paragraph_text(p):
+                target = p
+                break
+        if target is None:
+            skipped += 1
+            skipped_reasons.append(f"target_not_found:{hint[:20]}")
+            continue
+        if op in {"set_alignment", "set_paragraph_format"}:
+            align = str(params.get("alignment", ""))
+            if align == "left":
+                target.paragraph_format.alignment = ALIGN_LEFT
+            elif align == "center":
+                target.paragraph_format.alignment = ALIGN_CENTER
+            elif align == "right":
+                target.paragraph_format.alignment = ALIGN_RIGHT
+            elif align == "justified":
+                target.paragraph_format.alignment = ALIGN_JUSTIFIED
+            applied += 1
+        elif op == "set_first_line_indent_chars":
+            chars = float(params.get("value", 2))
+            set_first_line_indent_chars(target, chars)
+            applied += 1
+        elif op == "set_hanging_indent_chars":
+            chars = float(params.get("value", 2))
+            set_hanging_indent_chars(target, chars)
+            applied += 1
+        elif op == "set_spacing":
+            line_pt = params.get("line_spacing_pt")
+            if line_pt is not None:
+                target.paragraph_format.line_spacing = Pt(float(line_pt))
+            applied += 1
+        elif op == "set_run_font":
+            for run in target.runs:
+                run.font.name = str(params.get("font_ascii", run.font.name or "Times New Roman"))
+            applied += 1
+        else:
+            skipped += 1
+            skipped_reasons.append(f"unsupported:{op}")
+    doc.save(str(output_path))
+    return {"applied_count": applied, "skipped_count": skipped, "skipped_reasons": skipped_reasons}
+
+
 def collect_after_render_images(output_dir: Path, max_pages: int | None, all_pages: bool) -> list[dict[str, object]]:
     patterns = [
         output_dir / "render_qa" / "after",
@@ -5065,6 +5183,7 @@ def collect_llm_review_candidates(
     config: LLMReviewConfig,
 ) -> dict[str, object]:
     spec_text = extract_spec_docx_text(config.spec_docx_path) if config.spec_docx_path else ""
+    fixed_structure = extract_fixed_docx_structure_for_llm(fixed_docx)
     reviewed_pages = collect_after_render_images(output_dir, config.max_pages, config.all_pages)
     if not reviewed_pages:
         reviewed_pages = _collect_reviewed_pages(report, issues, config.max_pages)
@@ -5081,6 +5200,7 @@ def collect_llm_review_candidates(
         "review_image_paths": [str(page["image_path"]) for page in reviewed_pages if page.get("image_path")],
         "spec_docx_path": str(config.spec_docx_path) if config.spec_docx_path else "",
         "spec_text": spec_text,
+        "fixed_docx_structure": fixed_structure,
         "summary": {
             "issue_summary_by_category": report.get("issue_summary_by_category", {}),
             "layout_fix_policy": report.get("layout_fix_policy", {}),
@@ -5237,79 +5357,68 @@ def run_llm_review(config: LLMReviewConfig, candidates: dict[str, object], doten
 
     try:
         prefer_vision = config.mode in {"auto", "vision"} and bool(image_paths)
-        if prefer_vision and config.image_upload:
-            probe = probe_deepseek_image_upload_support(config, api_key, Path(image_paths[0]))
-            if probe.get("supported"):
-                image_upload_mode = "direct_upload"
-                evidence_source = "fixed_render_images"
-                vision_status = "ok"
-                merged: dict[str, object] = {"issues": [], "notes": [], "table_review": [], "blank_page_review": [], "figure_review": [], "reference_review": []}
-                batch_size = max(1, config.batch_size)
-                for i in range(0, len(image_paths), batch_size):
-                    batch_paths = image_paths[i : i + batch_size]
-                    batch_pages = reviewed_pages[i : i + batch_size]
-                    prompt = _build_llm_user_prompt(candidates, config.mode, batch_pages)
-                    content: list[dict[str, object]] = [{"type": "text", "text": prompt}]
-                    for image_path in batch_paths:
-                        uploaded = upload_llm_image_file(Path(image_path), config, api_key)
-                        file_id = uploaded.get("id") or uploaded.get("file_id")
-                        if not file_id:
-                            raise RuntimeError("upload_missing_file_id")
-                        content.append({"type": "input_file", "file_id": str(file_id)})
-                    batch_result = _invoke([{"role": "system", "content": LLM_REVIEW_SYSTEM_PROMPT}, {"role": "user", "content": content}])
-                    if batch_result.get("status") != "ok":
-                        result = batch_result
-                        break
-                    review = batch_result.get("review", {})
-                    if isinstance(review, dict):
-                        for key in ["issues", "notes", "table_review", "blank_page_review", "figure_review", "reference_review"]:
-                            if isinstance(review.get(key), list):
-                                merged[key].extend(review[key])
-                        merged["overall_risk"] = review.get("overall_risk", merged.get("overall_risk", "medium"))
-                        merged["toc_review"] = review.get("toc_review", merged.get("toc_review", {}))
-                else:
-                    merged["llm_review_version"] = "2.0"
-                    merged["review_basis"] = {
-                        "uses_spec_docx": bool(candidates.get("spec_text")),
-                        "uses_rendered_images": True,
-                        "spec_name": Path(str(candidates.get("spec_docx_path") or "")).name if candidates.get("spec_docx_path") else "",
-                        "image_source": "render_qa_after",
-                        "reviewed_pages": [p.get("page") for p in reviewed_pages if isinstance(p, dict)],
-                    }
-                    merged["mode"] = config.mode
-                    merged["evidence_source"] = evidence_source
-                    merged["vision_status"] = vision_status
-                    merged["reviewed_pages"] = reviewed_pages
-                    result = {
-                        "enabled": True,
-                        "provider": config.provider,
-                        "model": config.model,
-                        "mode": config.mode,
-                        "evidence_source": evidence_source,
-                        "vision_status": vision_status,
-                        "base_url": config.base_url,
-                        "image_upload_mode": image_upload_mode,
-                        "status": "ok",
-                        "review": merged,
-                    }
+        if prefer_vision:
+            image_upload_mode = "data_uri"
+            evidence_source = "fixed_render_images"
+            vision_status = "ok"
+            merged: dict[str, object] = {"issues": [], "notes": [], "table_review": [], "blank_page_review": [], "figure_review": [], "reference_review": []}
+            batch_size = max(1, config.batch_size)
+            for i in range(0, len(image_paths), batch_size):
+                batch_paths = image_paths[i : i + batch_size]
+                batch_pages = reviewed_pages[i : i + batch_size]
+                prompt = _build_llm_user_prompt(candidates, config.mode, batch_pages)
+                content: list[dict[str, object]] = [{"type": "text", "text": prompt}]
+                valid_image_count = 0
+                for image_path in batch_paths:
+                    if not Path(image_path).exists():
+                        continue
+                    content.append({"type": "image_url", "image_url": {"url": _image_to_data_uri(str(image_path))}})
+                    valid_image_count += 1
+                if valid_image_count == 0:
+                    continue
+                batch_result = _invoke([{"role": "system", "content": LLM_REVIEW_SYSTEM_PROMPT}, {"role": "user", "content": content}])
+                if batch_result.get("status") != "ok":
+                    result = batch_result
+                    break
+                review = batch_result.get("review", {})
+                if isinstance(review, dict):
+                    for key in ["issues", "notes", "table_review", "blank_page_review", "figure_review", "reference_review", "safe_edit_plan", "manual_review_items"]:
+                        if isinstance(review.get(key), list):
+                            merged[key].extend(review[key])
+                    merged["overall_risk"] = review.get("overall_risk", merged.get("overall_risk", "medium"))
+                    merged["toc_review"] = review.get("toc_review", merged.get("toc_review", {}))
             else:
-                vision_status = "unsupported"
-                evidence_source = "script_summary"
-                image_upload_mode = "failed"
-                if config.mode == "vision":
-                    return {
-                        "enabled": True,
-                        "provider": config.provider,
-                        "model": config.model,
-                        "mode": config.mode,
-                        "evidence_source": "script_summary",
-                        "vision_status": "unsupported",
-                        "image_upload_mode": "failed",
-                        "base_url": config.base_url,
-                        "status": "failed",
-                        "reason": str(probe.get("reason") or "vision_upload_unsupported"),
-                    }
-                result = _invoke([{"role": "system", "content": LLM_REVIEW_SYSTEM_PROMPT}, {"role": "user", "content": _build_llm_user_prompt(candidates, "text", [])}])
+                merged["llm_review_version"] = "3.0"
+                merged["provider"] = config.provider
+                merged["model"] = config.model
+                merged["basis"] = {
+                    "uses_spec_docx": bool(candidates.get("spec_text")),
+                    "uses_fixed_docx": True,
+                    "uses_rendered_images": True,
+                    "spec_name": Path(str(candidates.get("spec_docx_path") or "")).name if candidates.get("spec_docx_path") else "",
+                    "fixed_docx_name": Path(str(candidates.get("summary", {}).get("fixed_docx", ""))).name,
+                    "reviewed_pages": [p.get("page") for p in reviewed_pages if isinstance(p, dict)],
+                }
+                merged["overall_result"] = merged.get("overall_result", "needs_manual_review")
+                merged["overall_risk"] = merged.get("overall_risk", "medium")
+                merged["safe_edit_plan"] = merged.get("safe_edit_plan", [])
+                merged["manual_review_items"] = merged.get("manual_review_items", [])
+                merged["mode"] = config.mode
+                merged["evidence_source"] = evidence_source
+                merged["vision_status"] = vision_status
+                merged["reviewed_pages"] = reviewed_pages
+                result = {
+                    "enabled": True,
+                    "provider": config.provider,
+                    "model": config.model,
+                    "mode": config.mode,
+                    "evidence_source": evidence_source,
+                    "vision_status": vision_status,
+                    "base_url": config.base_url,
+                    "image_upload_mode": image_upload_mode,
+                    "status": "ok",
+                    "review": merged,
+                }
         else:
             evidence_source = "script_summary"
             vision_status = "not_requested" if config.mode == "text" else "unsupported"
@@ -5359,8 +5468,10 @@ def run(
     fixed_path = append_timestamp_to_name(output_dir / f"{input_path.stem}_format_fixed.docx", run_timestamp)
     report_path = append_timestamp_to_name(output_dir / f"{input_path.stem}_format_report.json", run_timestamp)
     html_report_path = append_timestamp_to_name(output_dir / f"{input_path.stem}_format_report.html", run_timestamp)
+    llm_fixed_path = append_timestamp_to_name(output_dir / f"{input_path.stem}_llm_fixed.docx", run_timestamp)
     llm_review_json_path = append_timestamp_to_name(output_dir / f"{input_path.stem}_llm_review.json", run_timestamp)
     llm_review_html_path = append_timestamp_to_name(output_dir / f"{input_path.stem}_llm_review.html", run_timestamp)
+    llm_edit_plan_path = append_timestamp_to_name(output_dir / f"{input_path.stem}_llm_edit_plan.json", run_timestamp)
 
     source_doc = Document(str(input_path))
     source_image_count = count_document_images(source_doc)
@@ -5507,6 +5618,16 @@ def run(
     }
     candidates = collect_llm_review_candidates(report, issues, fixed_path, output_dir, output_dir / "screenshots", llm_review_config)
     report["llm_review"] = run_llm_review(llm_review_config, candidates, dotenv_values=dotenv_values)
+    llm_review_obj = report["llm_review"] if isinstance(report["llm_review"], dict) else {}
+    llm_review_payload = llm_review_obj.get("review", {}) if isinstance(llm_review_obj.get("review"), dict) else {}
+    safe_edit_plan = llm_review_payload.get("safe_edit_plan", [])
+    if not isinstance(safe_edit_plan, list):
+        safe_edit_plan = []
+    apply_result = apply_llm_safe_edit_plan(fixed_path, safe_edit_plan, llm_fixed_path)
+    llm_edit_plan_path.write_text(json.dumps(safe_edit_plan, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
+    report["llm_fixed_docx"] = str(llm_fixed_path.resolve())
+    report["llm_edit_plan_json"] = str(llm_edit_plan_path.resolve())
+    report["llm_apply_result"] = apply_result
     report["llm_review_json"] = str(llm_review_json_path.resolve())
     report["llm_review_html"] = str(llm_review_html_path.resolve())
     llm_review_json_path.write_text(json.dumps(report["llm_review"], ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
@@ -5538,9 +5659,9 @@ def main() -> int:
     )
     parser.add_argument("--run-timestamp", default=None, help="Optional fixed run timestamp, e.g. 20260513_155821")
     parser.add_argument("--llm-review", action="store_true", help="Enable LLM high-risk format review.")
-    parser.add_argument("--llm-provider", default=None, help="LLM provider name, default deepseek.")
-    parser.add_argument("--llm-model", default=None, help="LLM model name, default deepseek-v4-pro.")
-    parser.add_argument("--llm-api-key-env", default="DEEPSEEK_API_KEY", help="Environment variable name for API key.")
+    parser.add_argument("--llm-provider", default=None, help="LLM provider name, default dashscope.")
+    parser.add_argument("--llm-model", default=None, help="LLM model name, default qwen3.6-plus.")
+    parser.add_argument("--llm-api-key-env", default="DASHSCOPE_API_KEY", help="Environment variable name for API key.")
     parser.add_argument("--llm-base-url", default=None, help="OpenAI-compatible base URL.")
     parser.add_argument("--llm-review-mode", choices=["auto", "text", "vision"], default="auto", help="LLM review mode.")
     parser.add_argument("--llm-review-max-pages", type=int, default=8, help="Max candidate item count for review.")
@@ -5548,6 +5669,7 @@ def main() -> int:
     parser.add_argument("--llm-review-all-pages", action="store_true", help="Use all rendered after pages for LLM review.")
     parser.add_argument("--llm-review-batch-size", type=int, default=6, help="Rendered image batch size for LLM review.")
     parser.add_argument("--llm-review-image-upload", action="store_true", default=True, help="Enable direct image upload for LLM review.")
+    parser.add_argument("--llm-review-image-transport", choices=["data_uri"], default="data_uri", help="Image transport for LLM vision.")
     parser.add_argument("--llm-review-no-separate-html", action="store_true", help="Disable separate LLM review HTML output.")
     parser.add_argument("--llm-review-output", default=None, help="Optional path to save raw LLM review JSON.")
     parser.add_argument("--llm-review-timeout", type=int, default=60, help="LLM request timeout seconds.")

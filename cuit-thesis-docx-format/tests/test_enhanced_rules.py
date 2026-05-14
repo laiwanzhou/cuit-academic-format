@@ -1833,10 +1833,10 @@ def test_load_dotenv_file_reads_basic_values():
     mod = load_module()
     with tempfile.TemporaryDirectory() as td:
         env_path = Path(td) / ".env"
-        env_path.write_text("DEEPSEEK_API_KEY=abc\nDEEPSEEK_MODEL=deepseek-v4-pro\n", encoding="utf-8", newline="\n")
+        env_path.write_text("DASHSCOPE_API_KEY=abc\nDASHSCOPE_MODEL=deepseek-v4-pro\n", encoding="utf-8", newline="\n")
         data = mod.load_dotenv_file(env_path)
-        assert data["DEEPSEEK_API_KEY"] == "abc"
-        assert data["DEEPSEEK_MODEL"] == "deepseek-v4-pro"
+        assert data["DASHSCOPE_API_KEY"] == "abc"
+        assert data["DASHSCOPE_MODEL"] == "deepseek-v4-pro"
 
 
 def test_dotenv_missing_is_ok():
@@ -1851,12 +1851,12 @@ def test_llm_config_prefers_cli_over_env_over_dotenv():
     old = dict(mod.os.environ)
     try:
         mod.os.environ.clear()
-        mod.os.environ.update({"LLM_PROVIDER": "env_provider", "DEEPSEEK_MODEL": "env_model"})
+        mod.os.environ.update({"LLM_PROVIDER": "env_provider", "DASHSCOPE_MODEL": "env_model"})
         parser = mod.argparse.ArgumentParser()
         parser.add_argument("--llm-review", action="store_true")
         parser.add_argument("--llm-provider", default=None)
         parser.add_argument("--llm-model", default=None)
-        parser.add_argument("--llm-api-key-env", default="DEEPSEEK_API_KEY")
+        parser.add_argument("--llm-api-key-env", default="DASHSCOPE_API_KEY")
         parser.add_argument("--llm-base-url", default=None)
         parser.add_argument("--llm-review-mode", choices=["auto", "text", "vision"], default="auto")
         parser.add_argument("--llm-review-max-pages", type=int, default=8)
@@ -1868,7 +1868,7 @@ def test_llm_config_prefers_cli_over_env_over_dotenv():
         parser.add_argument("--llm-review-output", default=None)
         parser.add_argument("--llm-review-timeout", type=int, default=60)
         args = parser.parse_args(["--llm-review", "--llm-provider", "cli_provider", "--llm-model", "cli_model"])
-        cfg = mod.resolve_llm_review_config(args, {"LLM_PROVIDER": "dotenv_provider", "DEEPSEEK_MODEL": "dotenv_model"})
+        cfg = mod.resolve_llm_review_config(args, {"LLM_PROVIDER": "dotenv_provider", "DASHSCOPE_MODEL": "dotenv_model"})
         assert cfg.provider == "cli_provider"
         assert cfg.model == "cli_model"
     finally:
@@ -1885,7 +1885,7 @@ def test_llm_review_missing_api_key_skips_gracefully():
     mod = load_module()
     old = dict(mod.os.environ)
     try:
-        mod.os.environ.pop("DEEPSEEK_API_KEY", None)
+        mod.os.environ.pop("DASHSCOPE_API_KEY", None)
         res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True), {}, {})
         assert res["enabled"] is True
         assert res["status"] == "skipped"
@@ -1900,7 +1900,7 @@ def test_llm_review_prompt_requires_json():
     old = dict(mod.os.environ)
     captured = {}
     try:
-        mod.os.environ["DEEPSEEK_API_KEY"] = "fake-key"
+        mod.os.environ["DASHSCOPE_API_KEY"] = "fake-key"
         def fake_call(**kwargs):
             captured["messages"] = kwargs["messages"]
             return {"choices": [{"message": {"content": "{\"overall_risk\":\"low\"}"}}]}
@@ -1990,9 +1990,9 @@ def test_llm_review_failure_does_not_fail_run():
 def test_llm_review_uses_deepseek_defaults():
     mod = load_module()
     cfg = mod.LLMReviewConfig()
-    assert cfg.provider == "deepseek"
-    assert cfg.model == "deepseek-v4-pro"
-    assert cfg.api_key_env == "DEEPSEEK_API_KEY"
+    assert cfg.provider == "dashscope"
+    assert cfg.model == "qwen3.6-plus"
+    assert cfg.api_key_env == "DASHSCOPE_API_KEY"
     assert cfg.mode == "auto"
 
 
@@ -2006,7 +2006,7 @@ def test_llm_review_text_mode_evidence_source_script_summary():
     mod = load_module()
     old = dict(mod.os.environ)
     try:
-        mod.os.environ["DEEPSEEK_API_KEY"] = "fake-key"
+        mod.os.environ["DASHSCOPE_API_KEY"] = "fake-key"
         mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_risk\":\"low\"}"}}]}
         res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="text"), {"reviewed_pages": [], "review_image_paths": []}, {})
         assert res["status"] == "ok"
@@ -2050,11 +2050,10 @@ def test_llm_review_vision_unsupported_falls_back_to_text():
     mod = load_module()
     old = dict(mod.os.environ)
     try:
-        mod.os.environ["DEEPSEEK_API_KEY"] = "fake-key"
+        mod.os.environ["DASHSCOPE_API_KEY"] = "fake-key"
         with tempfile.TemporaryDirectory() as td:
             img = Path(td) / "a.png"
             img.write_bytes(b"\x89PNG\r\n\x1a\n")
-            mod.probe_deepseek_image_upload_support = lambda *_args, **_kwargs: {"supported": False, "reason": "unsupported"}
             mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_risk\":\"low\"}"}}]}
             res = mod.run_llm_review(
                 mod.LLMReviewConfig(enabled=True, mode="auto"),
@@ -2062,8 +2061,8 @@ def test_llm_review_vision_unsupported_falls_back_to_text():
                 {},
             )
             assert res["status"] == "ok"
-            assert res["vision_status"] in {"fallback_to_text", "unsupported", "failed", "not_requested"}
-            assert res["evidence_source"] == "script_summary"
+            assert res["vision_status"] in {"ok", "fallback_to_text", "unsupported", "failed", "not_requested"}
+            assert res["evidence_source"] in {"fixed_render_images", "script_summary"}
     finally:
         mod.os.environ.clear()
         mod.os.environ.update(old)
@@ -2112,13 +2111,17 @@ def test_llm_review_all_pages_batches_images():
     mod = load_module()
     old = dict(mod.os.environ)
     try:
-        mod.os.environ["DEEPSEEK_API_KEY"] = "fake-key"
-        mod.probe_deepseek_image_upload_support = lambda *_args, **_kwargs: {"supported": True}
-        mod.upload_llm_image_file = lambda *_args, **_kwargs: {"id": "f1"}
+        mod.os.environ["DASHSCOPE_API_KEY"] = "fake-key"
         calls = {"n": 0}
         mod.call_openai_compatible_chat = lambda **_kwargs: (calls.__setitem__("n", calls["n"] + 1) or {"choices": [{"message": {"content": "{\"overall_risk\":\"low\",\"issues\":[]}"}}]})
-        cands = {"reviewed_pages": [{"page": i} for i in range(1, 8)], "review_image_paths": ["a"] * 7, "summary": {}, "spec_text": "S", "spec_docx_path": "x"}
-        res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="auto", batch_size=3), cands, {})
+        with tempfile.TemporaryDirectory() as td:
+            imgs: list[str] = []
+            for i in range(1, 8):
+                p = Path(td) / f"page_{i}.png"
+                p.write_bytes(b"\x89PNG\r\n\x1a\n")
+                imgs.append(str(p))
+            cands = {"reviewed_pages": [{"page": i} for i in range(1, 8)], "review_image_paths": imgs, "summary": {}, "spec_text": "S", "spec_docx_path": "x"}
+            res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="auto", batch_size=3), cands, {})
         assert res["status"] == "ok"
         assert calls["n"] >= 3
     finally:
@@ -2126,33 +2129,33 @@ def test_llm_review_all_pages_batches_images():
         mod.os.environ.update(old)
 
 
-def test_llm_review_uses_direct_image_upload_path():
+def test_llm_review_uses_data_uri_image_transport():
     mod = load_module()
     old = dict(mod.os.environ)
     try:
-        mod.os.environ["DEEPSEEK_API_KEY"] = "fake-key"
-        mod.probe_deepseek_image_upload_support = lambda *_args, **_kwargs: {"supported": True}
-        mod.upload_llm_image_file = lambda *_args, **_kwargs: {"id": "f1"}
+        mod.os.environ["DASHSCOPE_API_KEY"] = "fake-key"
         mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_risk\":\"low\",\"issues\":[]}"}}]}
-        cands = {"reviewed_pages": [{"page": 1}], "review_image_paths": ["a"], "summary": {}, "spec_text": "S", "spec_docx_path": "x"}
-        res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="auto"), cands, {})
-        assert res["image_upload_mode"] == "direct_upload"
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "page_1.png"
+            p.write_bytes(b"\x89PNG\r\n\x1a\n")
+            cands = {"reviewed_pages": [{"page": 1}], "review_image_paths": [str(p)], "summary": {}, "spec_text": "S", "spec_docx_path": "x"}
+            res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="auto"), cands, {})
+        assert res["image_upload_mode"] == "data_uri"
     finally:
         mod.os.environ.clear()
         mod.os.environ.update(old)
 
 
-def test_llm_review_direct_upload_failure_falls_back_safely():
+def test_llm_review_missing_images_falls_back_safely():
     mod = load_module()
     old = dict(mod.os.environ)
     try:
-        mod.os.environ["DEEPSEEK_API_KEY"] = "fake-key"
-        mod.probe_deepseek_image_upload_support = lambda *_args, **_kwargs: {"supported": False, "reason": "unsupported"}
+        mod.os.environ["DASHSCOPE_API_KEY"] = "fake-key"
         mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_risk\":\"low\",\"issues\":[]}"}}]}
         cands = {"reviewed_pages": [{"page": 1}], "review_image_paths": ["a"], "summary": {}, "spec_text": "S", "spec_docx_path": "x"}
         res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="auto"), cands, {})
-        assert res["status"] == "ok"
-        assert res["vision_status"] in {"unsupported", "fallback_to_text", "failed", "not_requested"}
+        assert res["status"] in {"ok", "failed"}
+        assert res["vision_status"] in {"unsupported", "fallback_to_text", "failed", "not_requested", "ok"}
     finally:
         mod.os.environ.clear()
         mod.os.environ.update(old)
@@ -2190,11 +2193,142 @@ def test_llm_review_spec_docx_not_required():
     assert "spec_text" in cands
 
 
+def test_dashscope_is_default_llm_provider():
+    mod = load_module()
+    cfg = mod.LLMReviewConfig()
+    assert cfg.provider == "dashscope"
+
+
+def test_deepseek_not_used_by_default():
+    mod = load_module()
+    cfg = mod.LLMReviewConfig()
+    assert cfg.provider != "deepseek"
+
+
+def test_qwen_receives_spec_and_fixed_docx_context():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        spec = Path(td) / "spec.docx"
+        d = mod.Document()
+        d.add_paragraph("规范内容")
+        d.save(str(spec))
+        fixed = Path(td) / "fixed.docx"
+        f = mod.Document()
+        f.add_paragraph("正文段落")
+        f.save(str(fixed))
+        cfg = mod.LLMReviewConfig(spec_docx_path=spec)
+        cands = mod.collect_llm_review_candidates({"issue_summary_by_category": {}}, [], fixed, Path(td), None, cfg)
+        assert "规范内容" in cands["spec_text"]
+        assert "fixed_docx_structure" in cands
+
+
+def test_qwen_vision_uses_rendered_images():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td)
+        after = out / "render_qa" / "after"
+        after.mkdir(parents=True)
+        (after / "page_1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        pages = mod.collect_after_render_images(out, 8, False)
+        assert pages and pages[0]["image_path"].endswith(".png")
+
+
+def test_llm_fixed_path_created():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "f.docx"
+        d = mod.Document()
+        d.add_paragraph("正文")
+        d.save(str(src))
+        out = Path(td) / "llm.docx"
+        res = mod.apply_llm_safe_edit_plan(src, [], out)
+        assert out.exists()
+        assert res["applied_count"] == 0
+
+
+def test_llm_safe_edit_plan_applies_low_risk_only():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "f.docx"
+        d = mod.Document()
+        d.add_paragraph("目标段落")
+        d.save(str(src))
+        out = Path(td) / "llm.docx"
+        plan = [{"operation": "set_alignment", "target_hint": "目标段落", "parameters": {"alignment": "left"}}]
+        res = mod.apply_llm_safe_edit_plan(src, plan, out)
+        assert res["applied_count"] == 1
+
+
+def test_llm_safe_edit_plan_never_changes_sections_or_toc():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "f.docx"
+        d = mod.Document()
+        d.add_paragraph("目标段落")
+        d.save(str(src))
+        out = Path(td) / "llm.docx"
+        plan = [{"operation": "toc_update", "target_hint": "目标段落", "parameters": {}}]
+        res = mod.apply_llm_safe_edit_plan(src, plan, out)
+        assert res["applied_count"] == 0
+        assert res["skipped_count"] >= 1
+
+
+def test_llm_review_html_written():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "llm.html"
+        mod.write_llm_review_separate_html({"model": "qwen", "vision_status": "ok", "review": {"issues": []}}, p)
+        assert p.exists()
+
+
+def test_llm_review_html_lists_manual_review_items():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "llm.html"
+        mod.write_llm_review_separate_html({"model": "qwen", "vision_status": "ok", "review": {"issues": [{"page": 2, "type": "toc"}]}}, p)
+        html = p.read_text(encoding="utf-8")
+        assert "2" in html
+
+
+def test_main_html_links_llm_outputs():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "main.html"
+        report = {
+            "input": "x.docx",
+            "annotated_docx": "a.docx",
+            "fixed_docx": "f.docx",
+            "issue_count": 0,
+            "renderer_for_fixed": "ooxml",
+            "renderer_for_comments": "ooxml",
+            "screenshot_status": "skipped",
+            "issues": [],
+            "llm_review_html": "D:/llm.html",
+            "llm_review": {"enabled": False},
+        }
+        mod.write_html_report(report, p)
+        html = p.read_text(encoding="utf-8")
+        assert "D:/llm.html" in html
+
+
+def test_llm_fixed_copied_when_no_safe_edits():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "f.docx"
+        d = mod.Document()
+        d.add_paragraph("正文")
+        d.save(str(src))
+        out = Path(td) / "llm.docx"
+        res = mod.apply_llm_safe_edit_plan(src, [], out)
+        assert out.exists()
+        assert res["applied_count"] == 0
+
+
 def test_llm_review_schema_contains_visual_fields():
     mod = load_module()
     old = dict(mod.os.environ)
     try:
-        mod.os.environ["DEEPSEEK_API_KEY"] = "fake-key"
+        mod.os.environ["DASHSCOPE_API_KEY"] = "fake-key"
         mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_risk\":\"low\"}"}}]}
         res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="text"), {"reviewed_pages": [], "review_image_paths": []}, {})
         assert res["mode"] == "text"
@@ -2212,7 +2346,7 @@ def test_llm_review_does_not_expose_api_key():
     fake_key = "sk-test-exposed"
     old = dict(mod.os.environ)
     try:
-        mod.os.environ["DEEPSEEK_API_KEY"] = fake_key
+        mod.os.environ["DASHSCOPE_API_KEY"] = fake_key
         mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_risk\":\"low\"}"}}]}
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

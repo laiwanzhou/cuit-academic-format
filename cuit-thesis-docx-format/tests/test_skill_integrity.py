@@ -489,6 +489,7 @@ class EnvSafetyTests(unittest.TestCase):
         env_example = ROOT.parent / ".env.example"
         self.assertTrue(env_example.exists())
         content = env_example.read_text(encoding="utf-8")
+        self.assertIn("your_dashscope_api_key_here", content)
         self.assertIn("your_deepseek_api_key_here", content)
         self.assertNotIn("sk-", content)
 
