@@ -491,3 +491,9 @@ class EnvSafetyTests(unittest.TestCase):
         content = env_example.read_text(encoding="utf-8")
         self.assertIn("your_deepseek_api_key_here", content)
         self.assertNotIn("sk-", content)
+
+    def test_local_spec_docx_is_gitignored_or_allowed(self):
+        root_gitignore = ROOT.parent / ".gitignore"
+        self.assertTrue(root_gitignore.exists())
+        content = root_gitignore.read_text(encoding="utf-8")
+        self.assertIn("成都信息工程大学学士学位论文规范.docx", content)

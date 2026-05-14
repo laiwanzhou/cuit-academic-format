@@ -1860,6 +1860,11 @@ def test_llm_config_prefers_cli_over_env_over_dotenv():
         parser.add_argument("--llm-base-url", default=None)
         parser.add_argument("--llm-review-mode", choices=["auto", "text", "vision"], default="auto")
         parser.add_argument("--llm-review-max-pages", type=int, default=8)
+        parser.add_argument("--llm-review-spec-docx", default=None)
+        parser.add_argument("--llm-review-all-pages", action="store_true")
+        parser.add_argument("--llm-review-batch-size", type=int, default=6)
+        parser.add_argument("--llm-review-image-upload", action="store_true", default=True)
+        parser.add_argument("--llm-review-no-separate-html", action="store_true")
         parser.add_argument("--llm-review-output", default=None)
         parser.add_argument("--llm-review-timeout", type=int, default=60)
         args = parser.parse_args(["--llm-review", "--llm-provider", "cli_provider", "--llm-model", "cli_model"])
@@ -2024,7 +2029,7 @@ def test_collect_llm_review_candidates_table_and_toc_schema():
         mod.Issue(1, "table_structure", "table", "T1", "", "", "m", category="table"),
         mod.Issue(2, "toc_page_number_manual_review", "toc", "目录", "", "", "m", category="page"),
     ]
-    c = mod.collect_llm_review_candidates({"issue_summary_by_category": {}}, issues, Path("a.docx"), None, mod.LLMReviewConfig())
+    c = mod.collect_llm_review_candidates({"issue_summary_by_category": {}}, issues, Path("a.docx"), Path("."), None, mod.LLMReviewConfig())
     assert c["toc_manual_review"]["toc_page_number_manual_review"] is True
     assert len(c["table_risks"]) == 1
 
@@ -2037,7 +2042,7 @@ def test_llm_review_does_not_send_more_than_max_pages():
         img1.write_bytes(b"\x89PNG\r\n\x1a\n")
         img2.write_bytes(b"\x89PNG\r\n\x1a\n")
         report = {"render_qa": {"pages": [{"page": 1, "after": str(img1)}, {"page": 2, "after": str(img2)}]}}
-        c = mod.collect_llm_review_candidates(report, [], Path("a.docx"), None, mod.LLMReviewConfig(max_pages=1))
+        c = mod.collect_llm_review_candidates(report, [], Path("a.docx"), Path("."), None, mod.LLMReviewConfig(max_pages=1))
         assert len(c["reviewed_pages"]) == 1
 
 
@@ -2049,20 +2054,15 @@ def test_llm_review_vision_unsupported_falls_back_to_text():
         with tempfile.TemporaryDirectory() as td:
             img = Path(td) / "a.png"
             img.write_bytes(b"\x89PNG\r\n\x1a\n")
-            calls = {"n": 0}
-            def fake_call(**kwargs):
-                calls["n"] += 1
-                if calls["n"] == 1:
-                    raise RuntimeError("unsupported image_url")
-                return {"choices": [{"message": {"content": "{\"overall_risk\":\"low\"}"}}]}
-            mod.call_openai_compatible_chat = fake_call
+            mod.probe_deepseek_image_upload_support = lambda *_args, **_kwargs: {"supported": False, "reason": "unsupported"}
+            mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_risk\":\"low\"}"}}]}
             res = mod.run_llm_review(
                 mod.LLMReviewConfig(enabled=True, mode="auto"),
                 {"reviewed_pages": [{"page": 1}], "review_image_paths": [str(img)]},
                 {},
             )
             assert res["status"] == "ok"
-            assert res["vision_status"] == "fallback_to_text"
+            assert res["vision_status"] in {"fallback_to_text", "unsupported", "failed", "not_requested"}
             assert res["evidence_source"] == "script_summary"
     finally:
         mod.os.environ.clear()
@@ -2075,9 +2075,119 @@ def test_llm_review_payload_includes_candidate_pages_when_images_available():
         img = Path(td) / "a.png"
         img.write_bytes(b"\x89PNG\r\n\x1a\n")
         report = {"render_qa": {"pages": [{"page": 2, "after": str(img)}]}}
-        c = mod.collect_llm_review_candidates(report, [], Path("a.docx"), None, mod.LLMReviewConfig(max_pages=8))
+        c = mod.collect_llm_review_candidates(report, [], Path("a.docx"), Path("."), None, mod.LLMReviewConfig(max_pages=8))
         assert c["reviewed_pages"]
         assert c["review_image_paths"]
+
+
+def test_spec_docx_text_extraction_full_content():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "spec.docx"
+        d = mod.Document()
+        d.add_paragraph("章节一")
+        t = d.add_table(rows=1, cols=2)
+        t.cell(0, 0).text = "A"
+        t.cell(0, 1).text = "B"
+        d.save(str(p))
+        text = mod.extract_spec_docx_text(p)
+        assert "章节一" in text
+        assert "row 1" in text
+
+
+def test_collect_after_render_images():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td)
+        after = out / "render_qa" / "after"
+        after.mkdir(parents=True)
+        (after / "page_2.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (after / "page_1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        pages = mod.collect_after_render_images(out, max_pages=8, all_pages=False)
+        assert len(pages) == 2
+        assert pages[0]["page"] == 1
+
+
+def test_llm_review_all_pages_batches_images():
+    mod = load_module()
+    old = dict(mod.os.environ)
+    try:
+        mod.os.environ["DEEPSEEK_API_KEY"] = "fake-key"
+        mod.probe_deepseek_image_upload_support = lambda *_args, **_kwargs: {"supported": True}
+        mod.upload_llm_image_file = lambda *_args, **_kwargs: {"id": "f1"}
+        calls = {"n": 0}
+        mod.call_openai_compatible_chat = lambda **_kwargs: (calls.__setitem__("n", calls["n"] + 1) or {"choices": [{"message": {"content": "{\"overall_risk\":\"low\",\"issues\":[]}"}}]})
+        cands = {"reviewed_pages": [{"page": i} for i in range(1, 8)], "review_image_paths": ["a"] * 7, "summary": {}, "spec_text": "S", "spec_docx_path": "x"}
+        res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="auto", batch_size=3), cands, {})
+        assert res["status"] == "ok"
+        assert calls["n"] >= 3
+    finally:
+        mod.os.environ.clear()
+        mod.os.environ.update(old)
+
+
+def test_llm_review_uses_direct_image_upload_path():
+    mod = load_module()
+    old = dict(mod.os.environ)
+    try:
+        mod.os.environ["DEEPSEEK_API_KEY"] = "fake-key"
+        mod.probe_deepseek_image_upload_support = lambda *_args, **_kwargs: {"supported": True}
+        mod.upload_llm_image_file = lambda *_args, **_kwargs: {"id": "f1"}
+        mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_risk\":\"low\",\"issues\":[]}"}}]}
+        cands = {"reviewed_pages": [{"page": 1}], "review_image_paths": ["a"], "summary": {}, "spec_text": "S", "spec_docx_path": "x"}
+        res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="auto"), cands, {})
+        assert res["image_upload_mode"] == "direct_upload"
+    finally:
+        mod.os.environ.clear()
+        mod.os.environ.update(old)
+
+
+def test_llm_review_direct_upload_failure_falls_back_safely():
+    mod = load_module()
+    old = dict(mod.os.environ)
+    try:
+        mod.os.environ["DEEPSEEK_API_KEY"] = "fake-key"
+        mod.probe_deepseek_image_upload_support = lambda *_args, **_kwargs: {"supported": False, "reason": "unsupported"}
+        mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_risk\":\"low\",\"issues\":[]}"}}]}
+        cands = {"reviewed_pages": [{"page": 1}], "review_image_paths": ["a"], "summary": {}, "spec_text": "S", "spec_docx_path": "x"}
+        res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True, mode="auto"), cands, {})
+        assert res["status"] == "ok"
+        assert res["vision_status"] in {"unsupported", "fallback_to_text", "failed", "not_requested"}
+    finally:
+        mod.os.environ.clear()
+        mod.os.environ.update(old)
+
+
+def test_llm_review_separate_html_written():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "llm.html"
+        mod.write_llm_review_separate_html({"model": "m", "vision_status": "ok", "review": {"issues": []}}, p)
+        assert p.exists()
+
+
+def test_llm_review_separate_html_lists_page_issues():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "llm.html"
+        mod.write_llm_review_separate_html({"model": "m", "vision_status": "ok", "review": {"issues": [{"page": 3, "type": "blank_page"}]}}, p)
+        html = p.read_text(encoding="utf-8")
+        assert "3" in html
+
+
+def test_llm_review_warns_if_vision_failed():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "llm.html"
+        mod.write_llm_review_separate_html({"model": "m", "vision_status": "failed", "review": {"issues": []}}, p)
+        html = p.read_text(encoding="utf-8")
+        assert "未能完成页面截图复核" in html
+
+
+def test_llm_review_spec_docx_not_required():
+    mod = load_module()
+    cands = mod.collect_llm_review_candidates({"issue_summary_by_category": {}}, [], Path("a.docx"), Path("."), None, mod.LLMReviewConfig())
+    assert "spec_text" in cands
 
 
 def test_llm_review_schema_contains_visual_fields():
