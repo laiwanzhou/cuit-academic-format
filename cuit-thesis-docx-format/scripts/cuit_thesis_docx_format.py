@@ -3716,6 +3716,77 @@ def _extract_summary_items(text: str) -> list[str]:
     return [p.strip(" ；;。") for p in re.split(r"[;\n]|；", text) if p.strip()]
 
 
+def _clean_expected_numeric(value: str) -> str:
+    text = value.strip()
+    text = re.sub(r"\.0(?=[^\d]|$)", "", text)
+    return text
+
+
+def humanize_problem_item(item: str) -> str:
+    text = re.sub(r"^\d+\.\s*", "", (item or "").strip())
+    if not text:
+        return "检测到该段可能不符合规范，建议人工复核。"
+    if "继承/未直接设置" in text or "未直接设置" in text or "继承" in text:
+        text = text.replace("继承/未直接设置", "").replace("未直接设置", "").replace("继承", "").strip(" ：:，,")
+    patterns: list[tuple[re.Pattern[str], str]] = [
+        (re.compile(r"^固定行距[:：].*应为\s*([0-9.]+)\s*磅"), "行距不符合要求，应为固定 {v} 磅。"),
+        (re.compile(r"^中文字体[:：].*应为\s*([^\s，。;；]+)"), "中文字体不符合要求，应使用{v}。"),
+        (re.compile(r"^西文字体[:：].*应为\s*([^\s，。;；]+(?:\s+[^\s，。;；]+)*)"), "西文字体不符合要求，应使用{v}。"),
+        (re.compile(r"^字号[:：].*应为\s*([0-9.]+)\s*pt", re.IGNORECASE), "字号不符合要求，应为 {v}pt。"),
+        (re.compile(r"^加粗[:：].*应为\s*是"), "文字应加粗。"),
+        (re.compile(r"^加粗[:：].*应为\s*否"), "文字不应加粗。"),
+        (re.compile(r"^对齐方式[:：].*应为\s*([^\s，。;；]+)"), "对齐方式不符合要求，应{v}。"),
+        (re.compile(r"^段前[:：].*应为\s*([0-9.]+)\s*行"), "段前间距不符合要求，应为 {v} 行。"),
+        (re.compile(r"^段后[:：].*应为\s*([0-9.]+)\s*行"), "段后间距不符合要求，应为 {v} 行。"),
+        (re.compile(r"^段前[:：].*应为\s*([0-9.]+)\s*pt", re.IGNORECASE), "段前间距不符合要求，应为 {v}pt。"),
+        (re.compile(r"^段后[:：].*应为\s*([0-9.]+)\s*pt", re.IGNORECASE), "段后间距不符合要求，应为 {v}pt。"),
+        (re.compile(r"^首行缩进[:：].*应为\s*([0-9.]+)\s*字符"), "首行缩进不符合要求，应缩进 {v} 个汉字符。"),
+        (re.compile(r"^悬挂缩进[:：].*应为\s*([0-9.]+)\s*字符"), "参考文献续行缩进不符合要求，应使用 Word 的“悬挂缩进 {v} 字符”。"),
+    ]
+    for pattern, template in patterns:
+        match = pattern.search(text)
+        if match:
+            value = _clean_expected_numeric(match.group(1)) if match.groups() else ""
+            return template.format(v=value)
+    if text.startswith("中文字体当前为 "):
+        current_font = text.removeprefix("中文字体当前为 ").split("，", 1)[0].strip()
+        if current_font:
+            return f"中文字体使用了{current_font}，应改为宋体。"
+        return "中文字体不符合要求，应使用宋体。"
+    if text.startswith("西文字体当前为 "):
+        current_font = text.removeprefix("西文字体当前为 ").split("，", 1)[0].strip()
+        norm_font = normalize_font_name(current_font)
+        if norm_font == "Times New Roman":
+            return ""
+        if current_font:
+            return f"西文字体使用了{current_font}，应改为 Times New Roman。"
+        return "西文字体不符合要求，应使用 Times New Roman。"
+    if "目录" in text and "人工复核" in text:
+        return "目录分页或页码需要人工复核，工具不自动修改。"
+    if "风险空段" in text:
+        return "检测到可能影响分页的空白段，建议人工复核。"
+    if text.startswith("文字片段=") or text.startswith("片段="):
+        return ""
+    if "段落样式" in text:
+        return ""
+    return text
+
+
+def humanize_issue_current(current: str | None) -> str:
+    text = (current or "").strip()
+    if not text:
+        return "检测到该段可能不符合规范。"
+    if "疑似不符合项：" in text:
+        items = _issue_problem_lines(text)
+        if items:
+            return "；".join(items)
+        return "检测到该段可能不符合规范。"
+    if "文字片段=" in text:
+        return "检测到该段存在文字级格式问题。"
+    cleaned = text.replace("继承/未直接设置", "").replace("未直接设置", "").replace("段落样式：Normal", "").strip(" ;；")
+    return cleaned or "检测到该段可能不符合规范。"
+
+
 def _extract_run_problem_items(current: str) -> list[str]:
     items: list[str] = []
     parts = [part.strip() for part in current.split(" | ") if part.strip()]
@@ -3759,11 +3830,17 @@ def _issue_problem_lines(current: str | None) -> list[str]:
             if marker in cut:
                 cut = cut.split(marker, 1)[0]
         diffs = _extract_summary_items(cut)
-        return diffs or ["检测到该段可能不符合规范，建议人工复核。"]
+        humanized = [humanize_problem_item(x) for x in diffs]
+        filtered = [x for x in humanized if x]
+        return filtered or ["检测到该段可能不符合规范，建议人工复核。"]
     if "文字片段=" in text:
-        return _extract_run_problem_items(text)
+        humanized = [humanize_problem_item(x) for x in _extract_run_problem_items(text)]
+        filtered = [x for x in humanized if x]
+        return filtered or ["检测到该段可能不符合规范，建议人工复核。"]
     plain = _extract_summary_items(text.replace("\r", "\n"))
-    return plain if plain else ["检测到该段可能不符合规范，建议人工复核。"]
+    humanized = [humanize_problem_item(x) for x in plain]
+    filtered = [x for x in humanized if x]
+    return filtered if filtered else ["检测到该段可能不符合规范，建议人工复核。"]
 
 
 def comment_message_for_issue(issue: Issue) -> str:
@@ -4282,9 +4359,14 @@ def attach_after_formats(fixed_path: Path, issues: list[Issue]) -> None:
 
 
 def issue_dict(issue: Issue) -> dict[str, object]:
-    after_text = issue.after
+    raw_after = issue.after
+    after_text = "已按规则修复格式。"
     if issue.rule_key in {"reference_272_type_format_mismatch", "reference_entry_format"}:
         after_text = "著录内容不自动改写，请人工按模板修改。"
+    elif issue.rule_key in {"toc_page_number_manual_review", "toc_body_section_manual_review", "toc_start_new_page_manual_review"}:
+        after_text = "该问题需要人工复核，工具不自动修改。"
+    elif issue.after and "无法可靠定位" in issue.after:
+        after_text = "结构调整后位置变化，建议人工复核。"
     problem_text = "\n".join(f"{i}. {line}" for i, line in enumerate(_issue_problem_lines(issue.current), start=1))
     return {
         "paragraph_index": issue.paragraph_index,
@@ -4294,10 +4376,12 @@ def issue_dict(issue: Issue) -> dict[str, object]:
         "text_excerpt": issue.text_excerpt,
         "location": issue.location,
         "page": issue.page,
-        "current": issue.current,
+        "current": humanize_issue_current(issue.current),
         "expected": issue.expected,
         "after": after_text,
         "message": f"本处问题：\n{problem_text}",
+        "raw_current": issue.current,
+        "raw_after": raw_after,
         "before_screenshot": issue.before_screenshot,
         "after_screenshot": issue.after_screenshot,
         "screenshot_note": issue.screenshot_note,

@@ -241,7 +241,7 @@ def test_issue_message_only_lists_actual_differences():
         category="title",
     )
     text = mod.comment_message_for_issue(issue)
-    assert "固定行距：当前 继承/未直接设置，应为 20.0磅" in text
+    assert "行距不符合要求，应为固定 20 磅。" in text
     assert "字号：16.0pt" not in text
     assert "加粗：是" not in text
     assert "对齐方式：居中" not in text
@@ -261,8 +261,8 @@ def test_issue_message_extracts_multiple_differences_before_summary():
         category="title",
     )
     text = mod.comment_message_for_issue(issue)
-    assert "中文字体：当前 黑体，应为 宋体" in text
-    assert "固定行距：当前 继承/未直接设置，应为 20.0磅" in text
+    assert "中文字体不符合要求，应使用宋体。" in text
+    assert "行距不符合要求，应为固定 20 磅。" in text
     assert "字号：16.0pt" not in text
     assert "段落样式：Normal" not in text
 
@@ -286,7 +286,7 @@ def test_run_formatting_does_not_list_correct_size_bold_alignment():
         category="run-format",
     )
     text = mod.comment_message_for_issue(issue)
-    assert "中文字体当前为 黑体" in text
+    assert "中文字体使用了黑体，应改为宋体。" in text
     assert "字号=16.0pt" not in text
     assert "加粗=是" not in text
 
@@ -401,8 +401,8 @@ def test_comment_merges_paragraph_and_run_issues_for_same_paragraph():
         ),
     ]
     merged = mod._merge_comment_message(issues)
-    assert "固定行距：当前 继承/未直接设置，应为 20.0磅" in merged
-    assert "中文字体当前为 黑体" in merged
+    assert "行距不符合要求，应为固定 20 磅。" in merged
+    assert "中文字体使用了黑体，应改为宋体。" in merged
 
 
 def test_merged_comment_does_not_include_correct_items():
@@ -433,6 +433,125 @@ def test_merged_comment_does_not_include_correct_items():
     assert "字号：16.0pt" not in merged
     assert "加粗：是" not in merged
     assert "对齐方式：居中" not in merged
+
+
+def test_humanize_problem_removes_inherited_unset_words():
+    mod = load_module()
+    out = mod.humanize_problem_item("固定行距：当前 继承/未直接设置，应为 20.0磅")
+    assert out == "行距不符合要求，应为固定 20 磅。"
+    assert "继承" not in out
+    assert "未直接设置" not in out
+
+
+def test_comment_message_uses_plain_problem_language():
+    mod = load_module()
+    issue = mod.Issue(
+        paragraph_index=1,
+        rule_key="title_zh",
+        text_type="title",
+        text_excerpt="题目",
+        current="疑似不符合项：中文字体：当前 黑体，应为 宋体；固定行距：当前 继承/未直接设置，应为 20.0磅; 段落样式：Normal; 字号：16.0pt; 加粗：是; 对齐方式：居中",
+        expected="中文论文题目应为宋体三号16pt，加粗，居中，固定20磅行距。",
+        message="",
+        category="title",
+    )
+    text = mod.comment_message_for_issue(issue)
+    assert "行距不符合要求，应为固定 20 磅。" in text
+    assert "中文字体不符合要求，应使用宋体。" in text
+    assert "继承/未直接设置" not in text
+    assert "段落样式：Normal" not in text
+    assert "字号：16.0pt" not in text
+    assert "加粗：是" not in text
+
+
+def test_html_issue_uses_plain_problem_language():
+    mod = load_module()
+    issue = mod.Issue(
+        paragraph_index=1,
+        rule_key="title_zh",
+        text_type="title",
+        text_excerpt="题目",
+        current="疑似不符合项：固定行距：当前 继承/未直接设置，应为 20.0磅; 段落样式：Normal",
+        expected="中文论文题目应为宋体三号16pt，加粗，居中，固定20磅行距。",
+        message="",
+        category="title",
+    )
+    payload = mod.issue_dict(issue)
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "r.html"
+        report = {
+            "input": "x.docx",
+            "annotated_docx": "a.docx",
+            "fixed_docx": "f.docx",
+            "issue_count": 1,
+            "renderer_for_fixed": "ooxml",
+            "renderer_for_comments": "ooxml",
+            "screenshot_status": "skipped",
+            "issues": [payload],
+            "issue_summary_by_category": {},
+            "reference_272_check_summary": {"total_entries": 0, "matched_entries": 0, "type_mismatch_entries": 0, "unmatched_entries": 0, "entries": []},
+            "reference_273_check_summary": {"online_entries": 0, "author_et_al_review_entries": 0, "citation_date_missing_entries": 0, "access_path_missing_entries": 0, "doi_or_url_missing_entries": 0, "entries": []},
+        }
+        mod.write_html_report(report, p)
+        html = p.read_text(encoding="utf-8")
+        assert "继承/未直接设置" not in html
+        assert "未直接设置" not in html
+        assert "段落样式：Normal" not in html
+
+
+def test_json_issue_uses_plain_problem_language():
+    mod = load_module()
+    issue = mod.Issue(
+        paragraph_index=1,
+        rule_key="title_zh",
+        text_type="title",
+        text_excerpt="题目",
+        current="疑似不符合项：固定行距：当前 继承/未直接设置，应为 20.0磅; 段落样式：Normal",
+        expected="中文论文题目应为宋体三号16pt，加粗，居中，固定20磅行距。",
+        message="",
+        category="title",
+    )
+    payload = mod.issue_dict(issue)
+    assert "继承/未直接设置" not in str(payload["current"])
+    assert "未直接设置" not in str(payload["current"])
+    assert "段落样式：Normal" not in str(payload["current"])
+    assert "继承/未直接设置" not in str(payload["message"])
+
+
+def test_run_formatting_plain_language():
+    mod = load_module()
+    issue = mod.Issue(
+        paragraph_index=1,
+        rule_key="title_zh_runs",
+        text_type="title run",
+        text_excerpt="题目",
+        current="文字片段='题目'；中文字体=黑体；西文字体=Times New Roman Regular；字号=16.0pt；加粗=是",
+        expected="中文论文题目应为宋体三号16pt，加粗，居中，固定20磅行距。",
+        message="",
+        category="run-format",
+    )
+    text = mod.comment_message_for_issue(issue)
+    assert "中文字体使用了黑体，应改为宋体。" in text
+    assert "字号=16.0pt" not in text
+    assert "加粗=是" not in text
+    assert "Regular" not in text
+
+
+def test_toc_report_only_language_plain():
+    mod = load_module()
+    issue = mod.Issue(
+        paragraph_index=1,
+        rule_key="toc_page_number_manual_review",
+        text_type="目录页码人工复核",
+        text_excerpt="目 录",
+        current="检测到目录/TOC 自动目录。由于目录页页码涉及 section、页脚 PAGE 域和 TOC 字段刷新，工具不自动修改。",
+        expected="目录所在前置页页脚页码应为小写罗马数字 i, ii, iii...",
+        message="",
+        category="page",
+    )
+    payload = mod.issue_dict(issue)
+    assert "OOXML" not in str(payload["message"])
+    assert "人工复核" in str(payload["after"]) or "不自动修改" in str(payload["after"])
 
 
 def test_comment_author_still_neutral_after_merge():

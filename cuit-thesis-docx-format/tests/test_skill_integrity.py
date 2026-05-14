@@ -134,7 +134,7 @@ class SkillIntegrityTests(unittest.TestCase):
         self.assertEqual(len(merged), 2)
         merged_text = module._merge_comment_message(merged)
         self.assertIn("固定行距不符合要求", merged_text)
-        self.assertIn("中文字体当前为 Times New Roman Regular", merged_text)
+        self.assertIn("中文字体使用了Times New Roman Regular，应改为宋体。", merged_text)
 
     def test_body_date_is_not_classified_as_cover_submission_date(self):
         module = self.load_checker_module()
