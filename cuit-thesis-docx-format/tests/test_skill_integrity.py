@@ -477,3 +477,17 @@ class SkillIntegrityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class EnvSafetyTests(unittest.TestCase):
+    def test_gitignore_contains_env(self):
+        root_gitignore = ROOT.parent / ".gitignore"
+        self.assertTrue(root_gitignore.exists())
+        content = root_gitignore.read_text(encoding="utf-8")
+        self.assertIn(".env", content)
+
+    def test_env_example_exists_without_real_key(self):
+        env_example = ROOT.parent / ".env.example"
+        self.assertTrue(env_example.exists())
+        content = env_example.read_text(encoding="utf-8")
+        self.assertIn("your_deepseek_api_key_here", content)
+        self.assertNotIn("sk-", content)

@@ -7,10 +7,13 @@ import argparse
 from copy import deepcopy
 import html
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 import zipfile
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -84,6 +87,7 @@ ALIGN_JUSTIFIED = ALIGNMENT_VALUES["justified"]
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
 RULE_CONFIG_PATH = SKILL_DIR / "references" / "rules.json"
+DEFAULT_DOTENV_PATH = SKILL_DIR.parent / ".env"
 
 
 def require_docx_dependencies() -> None:
@@ -133,6 +137,124 @@ class Issue:
     after_screenshot: str | None = None
     screenshot_note: str | None = None
 
+
+@dataclass(frozen=True)
+class LLMReviewConfig:
+    enabled: bool = False
+    provider: str = "deepseek"
+    model: str = "deepseek-v4-pro"
+    api_key_env: str = "DEEPSEEK_API_KEY"
+    base_url: str = "https://api.deepseek.com"
+    max_pages: int = 8
+    timeout: int = 60
+    output_path: Path | None = None
+
+
+LLM_REVIEW_SYSTEM_PROMPT = (
+    "你是论文格式高风险复核助手。你只做格式风险复核，不直接修改文档。请根据给定的脚本诊断摘要，判断是否存在需要人工复核的高风险问题，"
+    "包括空白页、空白段、目录页码、目录是否另起页、三线表、图题/表题位置、图片是否丢失、续表表头、参考文献著录格式风险。"
+    "你必须只输出 JSON，不要输出 Markdown，不要输出解释性前后缀。看不清或证据不足时，使用 not_sure 或 manual_review_needed，不要编造。"
+    "特别注意：1. 目录条目右侧页码应为阿拉伯数字，例如 1、3、7、12。2. 目录页底部页码属于前置页，应为小写罗马数字，例如 iii、iv。"
+    "3. 三线表一般只保留顶线、表头下线、底线，不应有竖线和全网格线。"
+    "4. LLM 复核结果只作为人工检查参考，不能替代脚本确定性检查。"
+    "5. 你不能要求自动修改 section、TOC field、PAGE field、表格边框或图片位置。"
+)
+
+
+def load_dotenv_file(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        if key:
+            values[key] = value
+    return values
+
+
+def get_config_value(name: str, cli_value: str | None, env: dict[str, str], dotenv: dict[str, str], default: str) -> str:
+    if cli_value is not None:
+        return cli_value
+    if env.get(name):
+        return env[name]
+    if dotenv.get(name):
+        return dotenv[name]
+    return default
+
+
+def _safe_positive_int(value: str | None, default: int) -> int:
+    try:
+        parsed = int(value or "")
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def resolve_llm_review_config(args: argparse.Namespace, dotenv: dict[str, str]) -> LLMReviewConfig:
+    env = os.environ
+    return LLMReviewConfig(
+        enabled=bool(args.llm_review),
+        provider=get_config_value("LLM_PROVIDER", args.llm_provider, env, dotenv, "deepseek"),
+        model=get_config_value("DEEPSEEK_MODEL", args.llm_model, env, dotenv, "deepseek-v4-pro"),
+        api_key_env=args.llm_api_key_env,
+        base_url=get_config_value("DEEPSEEK_BASE_URL", args.llm_base_url, env, dotenv, "https://api.deepseek.com"),
+        max_pages=_safe_positive_int(get_config_value("LLM_REVIEW_MAX_PAGES", str(args.llm_review_max_pages), env, dotenv, "8"), 8),
+        timeout=_safe_positive_int(get_config_value("LLM_REVIEW_TIMEOUT", str(args.llm_review_timeout), env, dotenv, "60"), 60),
+        output_path=Path(args.llm_review_output) if args.llm_review_output else None,
+    )
+
+
+def call_openai_compatible_chat(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict[str, str]],
+    timeout: int = 60,
+) -> dict:
+    endpoint = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    body = {"model": model, "messages": messages, "temperature": 0, "response_format": {"type": "json_object"}}
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError:
+        fallback = {"model": model, "messages": messages, "temperature": 0}
+        fallback_req = urllib.request.Request(
+            endpoint,
+            data=json.dumps(fallback, ensure_ascii=False).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(fallback_req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+
+def parse_llm_review_response(text: str) -> dict:
+    content = text.strip()
+    if content.startswith("```"):
+        content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.IGNORECASE)
+        content = re.sub(r"\s*```$", "", content)
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return {"enabled": True, "status": "failed", "reason": "invalid_json"}
+    if not isinstance(payload, dict):
+        return {"enabled": True, "status": "failed", "reason": "invalid_json"}
+    return payload
 
 RULES: dict[str, Rule] = {
     "chapter": Rule(
@@ -4527,6 +4649,31 @@ def write_html_report(report: dict[str, object], path: Path) -> None:
             "</ol>"
             "</section>"
         )
+    llm = report.get("llm_review")
+    if isinstance(llm, dict):
+        llm_status = str(llm.get("status", ""))
+        llm_block = [
+            "<section class='structure'>",
+            "<h2>LLM 高风险格式复核</h2>",
+            "<p>该部分由大语言模型根据脚本诊断摘要辅助复核，仅作为人工检查参考；不会自动修改文档。</p>",
+        ]
+        if llm.get("enabled") is False:
+            llm_block.append("<p>未启用 LLM 高风险格式复核。</p>")
+        elif llm_status == "skipped" and llm.get("reason") == "missing_api_key":
+            llm_block.append("<p>已请求 LLM 复核，但未配置 DEEPSEEK_API_KEY，因此已跳过。</p>")
+        elif llm_status == "ok" and isinstance(llm.get("review"), dict):
+            review = llm["review"]
+            llm_block.append(f"<p><strong>overall_risk：</strong>{html.escape(str(review.get('overall_risk', '')))}</p>")
+            llm_block.append(f"<pre>{html.escape(json.dumps(review, ensure_ascii=False, indent=2))}</pre>")
+        elif llm_status:
+            llm_block.append(f"<p>LLM 复核执行失败：{html.escape(str(llm.get('reason', llm_status)))}</p>")
+        llm_block.append("</section>")
+        llm_html = "".join(llm_block)
+    else:
+        llm_html = (
+            "<section class='structure'><h2>LLM 高风险格式复核</h2>"
+            "<p>未启用 LLM 高风险格式复核。</p></section>"
+        )
     rows = []
     for n, issue_obj in enumerate(issues, start=1):
         issue = issue_obj if isinstance(issue_obj, dict) else {}
@@ -4595,6 +4742,7 @@ code {{ background: #f3f4f6; padding: 1px 4px; }}
 {structure_html}
 {toc_manual_review_html}
 {toc_new_page_review_html}
+{llm_html}
 {qa_html}
 {''.join(rows)}
 </body>
@@ -4676,6 +4824,138 @@ def detect_toc_manual_review_issues(document: Document) -> list[Issue]:
     return issues
 
 
+def _truncate_text(value: object, limit: int = 240) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def collect_llm_review_candidates(
+    report: dict[str, object],
+    issues: list[Issue],
+    fixed_docx: Path,
+    screenshots_dir: Path | None,
+    config: LLMReviewConfig,
+) -> dict[str, object]:
+    issue_dicts = [issue_dict(issue) for issue in issues]
+    table_items = [item for item in issue_dicts if "table" in str(item.get("rule_key", "")) or str(item.get("category", "")) == "table"]
+    figure_items = [item for item in issue_dicts if "figure" in str(item.get("rule_key", "")) or str(item.get("category", "")) == "image"]
+    blank_items = [item for item in issue_dicts if "blank" in str(item.get("rule_key", "")) or str(item.get("category", "")) == "page"]
+    ref272 = report.get("reference_272_check_summary") if isinstance(report.get("reference_272_check_summary"), dict) else {}
+    ref273 = report.get("reference_273_check_summary") if isinstance(report.get("reference_273_check_summary"), dict) else {}
+    ref272_entries = [e for e in ref272.get("entries", []) if isinstance(e, dict) and e.get("status") != "matched"] if isinstance(ref272, dict) else []
+    ref273_entries = [e for e in ref273.get("entries", []) if isinstance(e, dict)] if isinstance(ref273, dict) else []
+    return {
+        "summary": {
+            "issue_summary_by_category": report.get("issue_summary_by_category", {}),
+            "layout_fix_policy": report.get("layout_fix_policy", {}),
+            "reference_272_check_summary": {
+                "total_entries": ref272.get("total_entries", 0) if isinstance(ref272, dict) else 0,
+                "type_mismatch_entries": ref272.get("type_mismatch_entries", 0) if isinstance(ref272, dict) else 0,
+                "unmatched_entries": ref272.get("unmatched_entries", 0) if isinstance(ref272, dict) else 0,
+            },
+            "reference_273_check_summary": {
+                "online_entries": ref273.get("online_entries", 0) if isinstance(ref273, dict) else 0,
+                "citation_date_missing_entries": ref273.get("citation_date_missing_entries", 0) if isinstance(ref273, dict) else 0,
+                "access_path_missing_entries": ref273.get("access_path_missing_entries", 0) if isinstance(ref273, dict) else 0,
+                "doi_or_url_missing_entries": ref273.get("doi_or_url_missing_entries", 0) if isinstance(ref273, dict) else 0,
+            },
+            "source_image_count": report.get("source_image_count"),
+            "fixed_image_count": report.get("fixed_image_count"),
+            "screenshot_status": report.get("screenshot_status"),
+            "renderer_for_fixed": report.get("renderer_for_fixed"),
+            "fixed_docx": str(fixed_docx),
+            "screenshots_dir": str(screenshots_dir) if screenshots_dir else "",
+        },
+        "toc_manual_review": {
+            "toc_page_number_manual_review": any(item.get("rule_key") == "toc_page_number_manual_review" for item in issue_dicts),
+            "toc_start_new_page_manual_review": any(item.get("rule_key") == "toc_start_new_page_manual_review" for item in issue_dicts),
+            "toc_body_section_manual_review": any(item.get("rule_key") == "toc_body_section_manual_review" for item in issue_dicts),
+            "note": "目录条目右侧页码应保持阿拉伯数字；目录页底部页码属于前置页，应为小写罗马数字。",
+        },
+        "blank_or_page_risks": [{"rule_key": x.get("rule_key"), "excerpt": _truncate_text(x.get("text_excerpt")), "message": _truncate_text(x.get("message"), 320)} for x in blank_items[: config.max_pages]],
+        "table_risks": [{"rule_key": x.get("rule_key"), "excerpt": _truncate_text(x.get("text_excerpt")), "message": _truncate_text(x.get("message"), 320)} for x in table_items[: config.max_pages]],
+        "figure_risks": [{"rule_key": x.get("rule_key"), "excerpt": _truncate_text(x.get("text_excerpt")), "message": _truncate_text(x.get("message"), 320)} for x in figure_items[: config.max_pages]],
+        "reference_risks": {
+            "reference_272_non_matched": ref272_entries[: config.max_pages],
+            "reference_273_manual_review": ref273_entries[: config.max_pages],
+        },
+    }
+
+
+def _extract_chat_content(payload: dict) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    msg = first.get("message") if isinstance(first, dict) else {}
+    if not isinstance(msg, dict):
+        return ""
+    return str(msg.get("content") or "")
+
+
+def run_llm_review(config: LLMReviewConfig, candidates: dict[str, object], dotenv_values: dict[str, str] | None = None) -> dict[str, object]:
+    if not config.enabled:
+        return {"enabled": False}
+    dotenv_values = dotenv_values or {}
+    api_key = os.environ.get(config.api_key_env) or dotenv_values.get(config.api_key_env, "")
+    if not api_key:
+        return {
+            "enabled": True,
+            "provider": config.provider,
+            "model": config.model,
+            "base_url": config.base_url,
+            "status": "skipped",
+            "reason": "missing_api_key",
+        }
+    user_prompt = (
+        "请仅输出 JSON 对象，严格符合以下 schema："
+        '{"llm_review_version":"1.0","provider":"deepseek","model":"deepseek-v4-pro","overall_risk":"low|medium|high",'
+        '"blank_page_review":[{"target":"abstract_to_toc|toc_to_body|body_heading|unknown","status":"ok|suspected_blank_page|manual_review_needed|not_sure","evidence":"string","suggestion":"string"}],'
+        '"toc_review":{"status":"ok|manual_review_needed|not_sure","toc_entry_page_numbers":"arabic|wrong|not_sure","toc_footer_page_number":"lower_roman|arabic|wrong|not_sure","toc_starts_new_page":"yes|no|not_sure","evidence":"string","suggestion":"string"},'
+        '"table_review":[{"table_label":"string","status":"ok|not_three_line_table|manual_review_needed|not_sure","evidence":"string","suggestion":"string"}],'
+        '"figure_review":[{"caption":"string","status":"ok|image_missing_near_caption|manual_review_needed|not_sure","evidence":"string","suggestion":"string"}],'
+        '"reference_review":[{"entry_index":"string","status":"ok|manual_review_needed|not_sure","evidence":"string","suggestion":"string"}],'
+        '"notes":["string"]}。'
+        f"候选摘要JSON如下：\n{json.dumps(candidates, ensure_ascii=False)}"
+    )
+    try:
+        payload = call_openai_compatible_chat(
+            base_url=config.base_url,
+            api_key=api_key,
+            model=config.model,
+            messages=[
+                {"role": "system", "content": LLM_REVIEW_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            timeout=config.timeout,
+        )
+        text = _extract_chat_content(payload)
+        parsed = parse_llm_review_response(text)
+        if parsed.get("status") == "failed":
+            return {"enabled": True, "provider": config.provider, "model": config.model, "base_url": config.base_url, **parsed}
+        result: dict[str, object] = {
+            "enabled": True,
+            "provider": config.provider,
+            "model": config.model,
+            "base_url": config.base_url,
+            "status": "ok",
+            "review": parsed,
+        }
+        if config.output_path is not None:
+            config.output_path.parent.mkdir(parents=True, exist_ok=True)
+            config.output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
+        return result
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "provider": config.provider,
+            "model": config.model,
+            "base_url": config.base_url,
+            "status": "failed",
+            "reason": f"api_error:{exc.__class__.__name__}",
+        }
+
+
 def run(
     input_path: Path,
     output_dir: Path,
@@ -4683,8 +4963,12 @@ def run(
     screenshots: str,
     allow_ooxml_layout_fixes: bool = False,
     run_timestamp: str | None = None,
+    llm_review_config: LLMReviewConfig | None = None,
+    dotenv_values: dict[str, str] | None = None,
 ) -> dict[str, object]:
     require_docx_dependencies()
+    llm_review_config = llm_review_config or LLMReviewConfig()
+    dotenv_values = dotenv_values or {}
     if not input_path.exists():
         raise FileNotFoundError(input_path)
     if not is_docx(input_path):
@@ -4840,6 +5124,8 @@ def run(
         "issues": [issue_dict(issue) for issue in issues],
         "unsupported_or_advisory": advisory,
     }
+    candidates = collect_llm_review_candidates(report, issues, fixed_path, output_dir / "screenshots", llm_review_config)
+    report["llm_review"] = run_llm_review(llm_review_config, candidates, dotenv_values=dotenv_values)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     write_html_report(report, html_report_path)
     return report
@@ -4865,7 +5151,17 @@ def main() -> int:
         ),
     )
     parser.add_argument("--run-timestamp", default=None, help="Optional fixed run timestamp, e.g. 20260513_155821")
+    parser.add_argument("--llm-review", action="store_true", help="Enable LLM high-risk format review.")
+    parser.add_argument("--llm-provider", default=None, help="LLM provider name, default deepseek.")
+    parser.add_argument("--llm-model", default=None, help="LLM model name, default deepseek-v4-pro.")
+    parser.add_argument("--llm-api-key-env", default="DEEPSEEK_API_KEY", help="Environment variable name for API key.")
+    parser.add_argument("--llm-base-url", default=None, help="OpenAI-compatible base URL.")
+    parser.add_argument("--llm-review-max-pages", type=int, default=8, help="Max candidate item count for review.")
+    parser.add_argument("--llm-review-output", default=None, help="Optional path to save raw LLM review JSON.")
+    parser.add_argument("--llm-review-timeout", type=int, default=60, help="LLM request timeout seconds.")
     args = parser.parse_args()
+    dotenv_values = load_dotenv_file(DEFAULT_DOTENV_PATH)
+    llm_config = resolve_llm_review_config(args, dotenv_values)
     report = run(
         Path(args.docx),
         Path(args.output_dir),
@@ -4873,6 +5169,8 @@ def main() -> int:
         args.screenshots,
         allow_ooxml_layout_fixes=args.allow_ooxml_layout_fixes,
         run_timestamp=args.run_timestamp,
+        llm_review_config=llm_config,
+        dotenv_values=dotenv_values,
     )
     print(stdout_json(report))
     return 0

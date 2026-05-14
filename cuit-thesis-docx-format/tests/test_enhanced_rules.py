@@ -1829,6 +1829,167 @@ def test_real_toc_field_paragraph_is_not_deleted():
     assert key.text.startswith("Key words")
 
 
+def test_load_dotenv_file_reads_basic_values():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        env_path = Path(td) / ".env"
+        env_path.write_text("DEEPSEEK_API_KEY=abc\nDEEPSEEK_MODEL=deepseek-v4-pro\n", encoding="utf-8", newline="\n")
+        data = mod.load_dotenv_file(env_path)
+        assert data["DEEPSEEK_API_KEY"] == "abc"
+        assert data["DEEPSEEK_MODEL"] == "deepseek-v4-pro"
+
+
+def test_dotenv_missing_is_ok():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        data = mod.load_dotenv_file(Path(td) / ".env")
+        assert data == {}
+
+
+def test_llm_config_prefers_cli_over_env_over_dotenv():
+    mod = load_module()
+    old = dict(mod.os.environ)
+    try:
+        mod.os.environ.clear()
+        mod.os.environ.update({"LLM_PROVIDER": "env_provider", "DEEPSEEK_MODEL": "env_model"})
+        parser = mod.argparse.ArgumentParser()
+        parser.add_argument("--llm-review", action="store_true")
+        parser.add_argument("--llm-provider", default=None)
+        parser.add_argument("--llm-model", default=None)
+        parser.add_argument("--llm-api-key-env", default="DEEPSEEK_API_KEY")
+        parser.add_argument("--llm-base-url", default=None)
+        parser.add_argument("--llm-review-max-pages", type=int, default=8)
+        parser.add_argument("--llm-review-output", default=None)
+        parser.add_argument("--llm-review-timeout", type=int, default=60)
+        args = parser.parse_args(["--llm-review", "--llm-provider", "cli_provider", "--llm-model", "cli_model"])
+        cfg = mod.resolve_llm_review_config(args, {"LLM_PROVIDER": "dotenv_provider", "DEEPSEEK_MODEL": "dotenv_model"})
+        assert cfg.provider == "cli_provider"
+        assert cfg.model == "cli_model"
+    finally:
+        mod.os.environ.clear()
+        mod.os.environ.update(old)
+
+
+def test_llm_review_disabled_by_default():
+    mod = load_module()
+    assert mod.run_llm_review(mod.LLMReviewConfig(enabled=False), {}, {}) == {"enabled": False}
+
+
+def test_llm_review_missing_api_key_skips_gracefully():
+    mod = load_module()
+    old = dict(mod.os.environ)
+    try:
+        mod.os.environ.pop("DEEPSEEK_API_KEY", None)
+        res = mod.run_llm_review(mod.LLMReviewConfig(enabled=True), {}, {})
+        assert res["enabled"] is True
+        assert res["status"] == "skipped"
+        assert res["reason"] == "missing_api_key"
+    finally:
+        mod.os.environ.clear()
+        mod.os.environ.update(old)
+
+
+def test_llm_review_prompt_requires_json():
+    mod = load_module()
+    old = dict(mod.os.environ)
+    captured = {}
+    try:
+        mod.os.environ["DEEPSEEK_API_KEY"] = "fake-key"
+        def fake_call(**kwargs):
+            captured["messages"] = kwargs["messages"]
+            return {"choices": [{"message": {"content": "{\"overall_risk\":\"low\"}"}}]}
+        mod.call_openai_compatible_chat = fake_call
+        mod.run_llm_review(mod.LLMReviewConfig(enabled=True), {"x": 1}, {})
+        user_msg = captured["messages"][1]["content"]
+        assert "输出 JSON 对象" in user_msg
+    finally:
+        mod.os.environ.clear()
+        mod.os.environ.update(old)
+
+
+def test_llm_review_result_rendered_in_html():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "r.html"
+        report = {
+            "input": "x.docx",
+            "annotated_docx": "a.docx",
+            "fixed_docx": "f.docx",
+            "issue_count": 0,
+            "renderer_for_fixed": "ooxml",
+            "renderer_for_comments": "ooxml",
+            "screenshot_status": "skipped",
+            "issues": [],
+            "llm_review": {"enabled": True, "status": "ok", "review": {"overall_risk": "low"}},
+        }
+        mod.write_html_report(report, p)
+        html = p.read_text(encoding="utf-8")
+        assert "LLM 高风险格式复核" in html
+
+
+def test_llm_review_failure_does_not_fail_run():
+    mod = load_module()
+    _prepare_run_stub(mod)
+    mod.run_llm_review = lambda *_args, **_kwargs: {"enabled": True, "status": "failed", "reason": "api_error:TimeoutError"}
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src = root / "sample.docx"
+        out = root / "out"
+        _make_minimal_docx(mod, src)
+        report = mod.run(src, out, "auto", "never", llm_review_config=mod.LLMReviewConfig(enabled=True))
+        assert report["llm_review"]["status"] == "failed"
+        assert Path(report["json_report"]).exists()
+
+
+def test_llm_review_uses_deepseek_defaults():
+    mod = load_module()
+    cfg = mod.LLMReviewConfig()
+    assert cfg.provider == "deepseek"
+    assert cfg.model == "deepseek-v4-pro"
+    assert cfg.api_key_env == "DEEPSEEK_API_KEY"
+
+
+def test_parse_llm_review_response_markdown_json_block():
+    mod = load_module()
+    parsed = mod.parse_llm_review_response("```json\n{\"k\":1}\n```")
+    assert parsed["k"] == 1
+
+
+def test_collect_llm_review_candidates_table_and_toc_schema():
+    mod = load_module()
+    issues = [
+        mod.Issue(1, "table_structure", "table", "T1", "", "", "m", category="table"),
+        mod.Issue(2, "toc_page_number_manual_review", "toc", "目录", "", "", "m", category="page"),
+    ]
+    c = mod.collect_llm_review_candidates({"issue_summary_by_category": {}}, issues, Path("a.docx"), None, mod.LLMReviewConfig())
+    assert c["toc_manual_review"]["toc_page_number_manual_review"] is True
+    assert len(c["table_risks"]) == 1
+
+
+def test_llm_review_does_not_expose_api_key():
+    mod = load_module()
+    _prepare_run_stub(mod)
+    fake_key = "sk-test-exposed"
+    old = dict(mod.os.environ)
+    try:
+        mod.os.environ["DEEPSEEK_API_KEY"] = fake_key
+        mod.call_openai_compatible_chat = lambda **_kwargs: {"choices": [{"message": {"content": "{\"overall_risk\":\"low\"}"}}]}
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "sample.docx"
+            out = root / "out"
+            _make_minimal_docx(mod, src)
+            report = mod.run(src, out, "auto", "never", llm_review_config=mod.LLMReviewConfig(enabled=True))
+            j = Path(report["json_report"]).read_text(encoding="utf-8")
+            h = Path(report["html_report"]).read_text(encoding="utf-8")
+            assert fake_key not in j
+            assert fake_key not in h
+            assert fake_key not in mod.stdout_json(report)
+    finally:
+        mod.os.environ.clear()
+        mod.os.environ.update(old)
+
+
 def test_keywords_to_toc_no_blank_page():
     mod = load_module()
     doc = mod.Document()
