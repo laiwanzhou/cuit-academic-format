@@ -192,6 +192,168 @@ def test_reference_273_author_et_al_review():
     assert "reference_273_author_et_al_review" in keys
 
 
+def test_comment_text_includes_expected_and_actual_problems():
+    mod = load_module()
+    issue = mod.Issue(
+        paragraph_index=1,
+        rule_key="keywords_en",
+        text_type="keywords paragraph",
+        text_excerpt="Key words: a; b",
+        current="当前对齐方式为两端对齐；当前固定行距未设置。",
+        expected="英文关键词段落应为 Times New Roman 小四 12pt，固定 20 磅行距。",
+        message="",
+        category="abstract",
+    )
+    text = mod.comment_message_for_issue(issue)
+    assert "正确格式：" in text
+    assert "本处问题：" in text
+    assert "当前对齐方式为两端对齐" in text
+
+
+def test_comment_text_does_not_list_correct_items_as_errors():
+    mod = load_module()
+    issue = mod.Issue(
+        paragraph_index=1,
+        rule_key="body",
+        text_type="body paragraph",
+        text_excerpt="正文",
+        current="当前固定行距未设置。",
+        expected="正文固定 20 磅行距。",
+        message="",
+        category="body",
+    )
+    text = mod.comment_message_for_issue(issue)
+    assert "本处问题：" in text
+    assert "固定行距" in text
+    assert "字体" not in text
+
+
+def test_html_issue_includes_expected_and_actual_problems():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "r.html"
+        report = {
+            "input": "x.docx",
+            "annotated_docx": "a.docx",
+            "fixed_docx": "f.docx",
+            "issue_count": 1,
+            "renderer_for_fixed": "ooxml",
+            "renderer_for_comments": "ooxml",
+            "screenshot_status": "skipped",
+            "issues": [
+                {
+                    "paragraph_index": 1,
+                    "text_type": "body paragraph",
+                    "text_excerpt": "正文",
+                    "current": "当前对齐方式为左对齐",
+                    "expected": "应为两端对齐",
+                    "message": "本处问题：\n1. 当前对齐方式为左对齐",
+                    "after": "已改为两端对齐",
+                }
+            ],
+            "issue_summary_by_category": {},
+            "reference_272_check_summary": {"total_entries": 0, "matched_entries": 0, "type_mismatch_entries": 0, "unmatched_entries": 0, "entries": []},
+            "reference_273_check_summary": {"online_entries": 0, "author_et_al_review_entries": 0, "citation_date_missing_entries": 0, "access_path_missing_entries": 0, "doi_or_url_missing_entries": 0, "entries": []},
+        }
+        mod.write_html_report(report, p)
+        html = p.read_text(encoding="utf-8")
+        assert "正确格式：" in html
+        assert "本处问题：" in html
+
+
+def test_reference_semantic_issue_keeps_manual_edit_after():
+    mod = load_module()
+    issue = mod.Issue(
+        paragraph_index=1,
+        rule_key="reference_entry_format",
+        text_type="reference entry",
+        text_excerpt="ref",
+        current="当前条目缺要素",
+        expected="应符合模板",
+        message="",
+        category="references",
+        after="其他文本",
+    )
+    payload = mod.issue_dict(issue)
+    assert payload["after"] == "著录内容不自动改写，请人工按模板修改。"
+
+
+def test_comment_author_uses_neutral_skill_name():
+    mod = load_module()
+    root = mod.ET.Element(mod.qname(mod.W_NS, "comments"))
+    mod.add_comment_node(root, 1, "text")
+    comment = root.find(mod.qname(mod.W_NS, "comment"))
+    assert comment is not None
+    assert comment.get(mod.qname(mod.W_NS, "author")) == "thesis format skill"
+
+
+def test_no_user_visible_codex_cuit_strings():
+    mod = load_module()
+    issue = mod.Issue(
+        paragraph_index=1,
+        rule_key="body",
+        text_type="body paragraph",
+        text_excerpt="正文",
+        current="当前格式错误",
+        expected="应为规范格式",
+        message="",
+        category="body",
+    )
+    text = mod.comment_message_for_issue(issue)
+    assert "Codex" not in text
+    assert "CUIT" not in text
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "r.html"
+        report = {
+            "input": "x.docx",
+            "annotated_docx": "a.docx",
+            "fixed_docx": "f.docx",
+            "issue_count": 0,
+            "renderer_for_fixed": "ooxml",
+            "renderer_for_comments": "ooxml",
+            "screenshot_status": "skipped",
+            "issues": [],
+            "issue_summary_by_category": {},
+            "reference_272_check_summary": {"total_entries": 0, "matched_entries": 0, "type_mismatch_entries": 0, "unmatched_entries": 0, "entries": []},
+            "reference_273_check_summary": {"online_entries": 0, "author_et_al_review_entries": 0, "citation_date_missing_entries": 0, "access_path_missing_entries": 0, "doi_or_url_missing_entries": 0, "entries": []},
+        }
+        mod.write_html_report(report, p)
+        html = p.read_text(encoding="utf-8")
+        assert "Codex" not in html
+        assert "CUIT" not in html
+
+
+def test_html_title_no_codex_cuit():
+    mod = load_module()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "r.html"
+        report = {
+            "input": "x.docx",
+            "annotated_docx": "a.docx",
+            "fixed_docx": "f.docx",
+            "issue_count": 0,
+            "renderer_for_fixed": "ooxml",
+            "renderer_for_comments": "ooxml",
+            "screenshot_status": "skipped",
+            "issues": [],
+            "issue_summary_by_category": {},
+            "reference_272_check_summary": {"total_entries": 0, "matched_entries": 0, "type_mismatch_entries": 0, "unmatched_entries": 0, "entries": []},
+            "reference_273_check_summary": {"online_entries": 0, "author_et_al_review_entries": 0, "citation_date_missing_entries": 0, "access_path_missing_entries": 0, "doi_or_url_missing_entries": 0, "entries": []},
+        }
+        mod.write_html_report(report, p)
+        html = p.read_text(encoding="utf-8")
+        assert "thesis format skill report" in html
+        assert "Codex" not in html
+        assert "CUIT" not in html
+
+
+def test_cli_report_metadata_no_codex_cuit():
+    mod = load_module()
+    payload = mod.stdout_json({"tool_name": "thesis format skill"})
+    assert "Codex" not in payload
+    assert "CUIT" not in payload
+
+
 def test_reference_checks_scope_only_references():
     mod = load_module()
     doc = mod.Document()

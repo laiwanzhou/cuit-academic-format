@@ -68,9 +68,8 @@ class SkillIntegrityTests(unittest.TestCase):
         message = module.comment_message_for_issue(issue)
 
         self.assertIn("关键词段落格式不符合要求。", message)
-        self.assertIn("需调整：", message)
-        self.assertIn("关键词标签加粗", message)
-        self.assertLessEqual(len(message), 220)
+        self.assertIn("正确格式：", message)
+        self.assertIn("本处问题：", message)
         self.assertNotIn("文字片段", message)
         self.assertNotIn("中文字体=", message)
 
@@ -90,9 +89,9 @@ class SkillIntegrityTests(unittest.TestCase):
 
         message = module.comment_message_for_issue(issue)
 
-        self.assertIn("首行缩进 2 个汉字符", message)
-        self.assertIn("段前 0 磅，段后 0 磅", message)
-        self.assertNotIn("按学校规范设置", message)
+        self.assertIn("正确格式：", message)
+        self.assertIn("本处问题：", message)
+        self.assertIn("段前 16.35pt", message)
 
     def test_body_indent_is_written_as_two_character_units_not_centimeters(self):
         module = self.load_checker_module()

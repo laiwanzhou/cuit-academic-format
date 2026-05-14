@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check and fix CUIT bachelor thesis DOCX formatting."""
+"""Check and fix bachelor thesis DOCX formatting."""
 
 from __future__ import annotations
 
@@ -3546,7 +3546,7 @@ def ensure_comments_relationship(workdir: Path) -> None:
 def add_comment_node(comments_root: ET.Element, comment_id: int, text: str) -> None:
     comment = ET.SubElement(comments_root, qname(W_NS, "comment"))
     comment.set(qname(W_NS, "id"), str(comment_id))
-    comment.set(qname(W_NS, "author"), "Codex CUIT thesis format skill")
+    comment.set(qname(W_NS, "author"), "thesis format skill")
     comment.set(qname(W_NS, "date"), datetime.now(timezone.utc).isoformat())
     p = ET.SubElement(comment, qname(W_NS, "p"))
     for line_no, line in enumerate(text.splitlines()):
@@ -3693,10 +3693,22 @@ def _short_expected_items(issue: Issue) -> list[str]:
     return [issue.expected]
 
 
+def _issue_problem_lines(current: str | None) -> list[str]:
+    text = (current or "").strip()
+    if not text:
+        return ["检测到该段可能不符合规范，建议人工复核。"]
+    text = text.replace("文字片段=", "片段=").replace("中文字体=", "中文字体为 ").replace("西文字体=", "西文字体为 ")
+    compact = text.replace("\r", "\n")
+    pieces = [p.strip(" ；;。") for p in re.split(r"[;\n]|；", compact) if p.strip()]
+    if not pieces:
+        return [text]
+    return pieces
+
+
 def comment_message_for_issue(issue: Issue) -> str:
     title = _comment_title(issue)
-    lines = [f"{title}格式不符合要求。", "", "需调整："]
-    for index, item in enumerate(_short_expected_items(issue), start=1):
+    lines = [f"{title}格式不符合要求。", "", "正确格式：", issue.expected or "请按规范要求设置。", "", "本处问题："]
+    for index, item in enumerate(_issue_problem_lines(issue.current), start=1):
         lines.append(f"{index}. {item}")
     return "\n".join(lines)
 
@@ -3958,7 +3970,7 @@ def _find_codex_render_docx() -> Path | None:
 def _render_docx_pages_with_artifact_tool(docx_path: Path, out_dir: Path) -> list[Path]:
     render_script = _find_codex_render_docx()
     if render_script is None:
-        raise RuntimeError("Codex documents render_docx.py was not found.")
+        raise RuntimeError("documents render_docx.py was not found.")
     out_dir.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable,
@@ -4088,7 +4100,7 @@ def render_full_document_qa(
         records = _qa_page_records(before_pages, after_pages)
         finding_count = sum(len(record["findings"]) for record in records)
         status = (
-            "Full-document render QA generated with Codex artifact-tool. "
+            "Full-document render QA generated with artifact-tool. "
             f"Rendered {len(before_pages)} before pages and {len(after_pages)} after pages; "
             f"basic image checks found {finding_count} warning(s). "
             "When the fixed DOCX is produced through OOXML fallback, these page images are QA previews only and may not match Word/WPS rendering exactly."
@@ -4187,6 +4199,7 @@ def issue_dict(issue: Issue) -> dict[str, object]:
     after_text = issue.after
     if issue.rule_key in {"reference_272_type_format_mismatch", "reference_entry_format"}:
         after_text = "著录内容不自动改写，请人工按模板修改。"
+    problem_text = "\n".join(f"{i}. {line}" for i, line in enumerate(_issue_problem_lines(issue.current), start=1))
     return {
         "paragraph_index": issue.paragraph_index,
         "rule_key": issue.rule_key,
@@ -4198,7 +4211,7 @@ def issue_dict(issue: Issue) -> dict[str, object]:
         "current": issue.current,
         "expected": issue.expected,
         "after": after_text,
-        "message": issue.message,
+        "message": f"本处问题：\n{problem_text}",
         "before_screenshot": issue.before_screenshot,
         "after_screenshot": issue.after_screenshot,
         "screenshot_note": issue.screenshot_note,
@@ -4294,7 +4307,7 @@ def write_html_report(report: dict[str, object], path: Path) -> None:
             qa_rows.append(
                 "<section class='qa-page'>"
                 f"<h3>页面 {html.escape(str(page.get('page')))}</h3>"
-                f"<p><strong>基础检查：</strong>{html.escape(warning_text or '未发现图片尺寸/文件异常')}</p>"
+                f"<p><strong>本处问题：</strong>{html.escape(warning_text or '未发现图片尺寸/文件异常')}</p>"
                 f"<div class='shots'>{before_html}{after_html}</div>"
                 "</section>"
             )
@@ -4366,7 +4379,8 @@ def write_html_report(report: dict[str, object], path: Path) -> None:
             f"{'，页 ' + html.escape(str(issue.get('page'))) if issue.get('page') else ''}</p>"
             f"<p><strong>文本：</strong>{html.escape(str(issue.get('text_excerpt') or ''))}</p>"
             f"<p><strong>修改前：</strong>{html.escape(str(issue.get('current') or ''))}</p>"
-            f"<p><strong>应改为：</strong>{html.escape(str(issue.get('expected') or ''))}</p>"
+            f"<p><strong>正确格式：</strong>{html.escape(str(issue.get('expected') or ''))}</p>"
+            f"<p><strong>本处问题：</strong>{html.escape(str(issue.get('message') or ''))}</p>"
             f"<p><strong>修改后：</strong>{html.escape(str(issue.get('after') or ''))}</p>"
             f"{screenshots}"
             "</section>"
@@ -4375,7 +4389,7 @@ def write_html_report(report: dict[str, object], path: Path) -> None:
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>CUIT thesis DOCX format report</title>
+<title>thesis format skill report</title>
 <style>
 body {{ font-family: "Microsoft YaHei", "Segoe UI", sans-serif; margin: 32px; line-height: 1.6; color: #1f2937; }}
 h1 {{ margin-bottom: 8px; }}
@@ -4393,7 +4407,7 @@ code {{ background: #f3f4f6; padding: 1px 4px; }}
 </style>
 </head>
 <body>
-<h1>成都信息工程大学学士学位论文 DOCX 格式检查报告</h1>
+<h1>学士学位论文 DOCX 格式检查报告</h1>
 <div class="summary">
 <p><strong>输入文件：</strong>{html.escape(str(report.get("input", "")))}</p>
 <p><strong>批注版：</strong>{html.escape(str(report.get("annotated_docx", "")))}</p>
@@ -4659,7 +4673,7 @@ def run(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Check and fix CUIT bachelor thesis DOCX formatting.")
+    parser = argparse.ArgumentParser(description="Check and fix bachelor thesis DOCX formatting.")
     parser.add_argument("docx", help="Input .docx thesis path")
     parser.add_argument("--output-dir", default="./format_results", help="Output directory")
     parser.add_argument("--renderer", choices=["auto", "office", "wps", "ooxml"], default="auto")
