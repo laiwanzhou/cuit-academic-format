@@ -906,3 +906,331 @@ class ManualReviewItemsFieldCompatibilityTests(unittest.TestCase):
             html_text = html_path.read_text(encoding="utf-8")
             self.assertIn("需要在实际 Word 文档中人工检查", html_text)
             self.assertIn("不会自动执行修改", html_text)
+
+
+class LLMReportQualityTests(unittest.TestCase):
+    """Tests for page matching, Chinese localization, table border checks."""
+
+    def load_checker_module(self):
+        module_path = ROOT / "scripts" / "cuit_thesis_docx_format.py"
+        spec = importlib.util.spec_from_file_location("cuit_thesis_docx_format", module_path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    # ---- Page field prompt tests ----
+
+    def test_page_field_in_prompt(self):
+        """Prompt must include page/location_hint instructions."""
+        module = self.load_checker_module()
+        prompt = module._build_evidence_first_fileid_prompt()
+        self.assertIn("page", prompt.lower())
+        self.assertIn("location_hint", prompt)
+        self.assertIn("不得编造页码", prompt)
+
+    # ---- Page display tests ----
+
+    def test_zh_page_unknown(self):
+        module = self.load_checker_module()
+        self.assertEqual(module._zh_page("unknown"), "页码未知")
+        self.assertEqual(module._zh_page(""), "页码未知")
+        self.assertEqual(module._zh_page(None), "页码未知")
+
+    def test_zh_page_number(self):
+        module = self.load_checker_module()
+        self.assertEqual(module._zh_page("3"), "第 3 页")
+        self.assertEqual(module._zh_page("12"), "第 12 页")
+
+    # ---- Error type Chinese tests ----
+
+    def test_zh_issue_type_maps_known_keys(self):
+        module = self.load_checker_module()
+        self.assertEqual(module._zh_issue_type("incorrect_title_format"), "标题编号或标题格式不规范")
+        self.assertEqual(module._zh_issue_type("figure_caption_format"), "图题格式不规范")
+        self.assertEqual(module._zh_issue_type("table_caption_format"), "表题格式不规范")
+        self.assertEqual(module._zh_issue_type("section_numbering_format"), "章节编号格式不规范")
+        self.assertEqual(module._zh_issue_type("whitespace_error"), "文本空白或间距异常")
+
+    def test_html_body_no_english_type_names(self):
+        """HTML body should not expose raw English type keys."""
+        import tempfile
+        module = self.load_checker_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            html_path = Path(tmpdir) / "llm.html"
+            module.write_llm_review_separate_html(
+                {
+                    "provider": "dashscope",
+                    "model": "qwen-long",
+                    "actual_review_model": "qwen-long",
+                    "review": {
+                        "basis": {
+                            "review_mode": "qwen_long_fileid_docx",
+                            "document_upload_status": "ok",
+                            "fallback_used": False,
+                        },
+                        "text_verified_issues": [
+                            {
+                                "type": "incorrect_title_format",
+                                "severity": "high",
+                                "page": "unknown",
+                                "evidence_exact_quote": "第1章 绪论",
+                                "spec_basis": "规范要求",
+                                "suggestion": "修改标题编号",
+                            }
+                        ],
+                        "manual_layout_checks": [],
+                        "rejected_or_unverified_claims": [],
+                    },
+                },
+                html_path,
+            )
+            html_text = html_path.read_text(encoding="utf-8")
+            # The Chinese label should appear
+            self.assertIn("标题编号或标题格式不规范", html_text)
+            # But BEFORE the foldable JSON section, raw English type should not appear
+            # Split at the first <details> to get the visible body
+            body = html_text.split("<details>")[0]
+            self.assertNotIn("incorrect_title_format", body)
+            self.assertNotIn("missing_figure_caption_format", body)
+            self.assertNotIn("missing_table_caption_format", body)
+            self.assertNotIn("inconsistent_chapter_title", body)
+
+    # ---- Evidence page matching tests ----
+
+    def test_assign_pages_to_text_issues_normalized_match(self):
+        """Normalized evidence should match against page texts."""
+        module = self.load_checker_module()
+        review = {
+            "text_verified_issues": [
+                {
+                    "evidence_exact_quote": "2 . 1  开发环境",
+                    "type": "title_format",
+                }
+            ]
+        }
+        page_texts = [
+            {"page": 3, "text": "2.1 开发环境 本章介绍开发所使用的工具和环境配置。"},
+        ]
+        module._assign_pages_to_text_issues(review, page_texts)
+        issue = review["text_verified_issues"][0]
+        self.assertEqual(issue["page"], "3")
+        self.assertEqual(issue["page_match_source"], "rendered_page_text")
+        self.assertEqual(issue["page_match_mode"], "normalized")
+
+    def test_assign_pages_to_text_issues_no_match(self):
+        """When evidence doesn't match, page stays unknown."""
+        module = self.load_checker_module()
+        review = {
+            "text_verified_issues": [
+                {
+                    "evidence_exact_quote": "完全不存在的文本内容",
+                    "type": "title_format",
+                }
+            ]
+        }
+        page_texts = [
+            {"page": 1, "text": "一些完全不相关的内容。"},
+        ]
+        module._assign_pages_to_text_issues(review, page_texts)
+        issue = review["text_verified_issues"][0]
+        self.assertEqual(issue["page"], "unknown")
+        self.assertEqual(issue["page_match_source"], "unknown")
+
+    # ---- Three-line table detection tests ----
+
+    def test_inspect_table_borders_detects_inside_v(self):
+        """A table with insideV border should be not_three_line_candidate."""
+        module = self.load_checker_module()
+        from lxml import etree
+        nsmap = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        tbl_xml = (
+            '<w:tbl xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:tblPr>'
+            '<w:tblBorders>'
+            '<w:top w:val="single" w:sz="12"/>'
+            '<w:bottom w:val="single" w:sz="12"/>'
+            '<w:insideH w:val="single" w:sz="6"/>'
+            '<w:insideV w:val="single" w:sz="4"/>'
+            '</w:tblBorders>'
+            '</w:tblPr>'
+            '<w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr>'
+            '</w:tbl>'
+        )
+        tbl = etree.fromstring(tbl_xml.encode("utf-8"))
+
+        class MockTable:
+            _tbl = tbl
+
+        result = module._inspect_table_borders(MockTable())
+        self.assertEqual(result["status"], "not_three_line_candidate")
+        self.assertIn("竖向边框", result["reason"])
+
+    def test_inspect_table_borders_cell_inside_v(self):
+        """Cell-level vertical borders should also trigger not_three_line_candidate."""
+        module = self.load_checker_module()
+        from lxml import etree
+        tbl_xml = (
+            '<w:tbl xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:tblPr><w:tblBorders><w:top w:val="single"/></w:tblBorders></w:tblPr>'
+            '<w:tr>'
+            '<w:tc>'
+            '<w:tcPr>'
+            '<w:tcBorders>'
+            '<w:top w:val="single"/>'
+            '<w:bottom w:val="single"/>'
+            '<w:right w:val="single"/>'
+            '<w:left w:val="single"/>'
+            '</w:tcBorders>'
+            '</w:tcPr>'
+            '<w:p><w:r><w:t>Cell</w:t></w:r></w:p>'
+            '</w:tc>'
+            '</w:tr>'
+            '</w:tbl>'
+        )
+        tbl = etree.fromstring(tbl_xml.encode("utf-8"))
+
+        class MockTable:
+            _tbl = tbl
+
+        result = module._inspect_table_borders(MockTable())
+        self.assertEqual(result["status"], "not_three_line_candidate")
+        self.assertIn("竖向边框", result["reason"])
+
+    def test_inspect_table_borders_no_borders_is_unknown(self):
+        """Table with no border info should be unknown."""
+        module = self.load_checker_module()
+        from lxml import etree
+        tbl_xml = (
+            '<w:tbl xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:tblPr></w:tblPr>'
+            '<w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr>'
+            '</w:tbl>'
+        )
+        tbl = etree.fromstring(tbl_xml.encode("utf-8"))
+
+        class MockTable:
+            _tbl = tbl
+
+        result = module._inspect_table_borders(MockTable())
+        self.assertEqual(result["status"], "unknown")
+        self.assertIn("未在直接 OOXML", result["reason"])
+
+    # ---- Manual layout checks merge test ----
+
+    def test_table_border_checks_in_html(self):
+        """Deterministic table border checks should appear in manual_layout_checks in HTML."""
+        import tempfile
+        module = self.load_checker_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            html_path = Path(tmpdir) / "llm.html"
+            module.write_llm_review_separate_html(
+                {
+                    "provider": "dashscope",
+                    "model": "qwen-long",
+                    "actual_review_model": "qwen-long",
+                    "review": {
+                        "basis": {
+                            "review_mode": "qwen_long_fileid_docx",
+                            "document_upload_status": "ok",
+                            "fallback_used": False,
+                        },
+                        "text_verified_issues": [],
+                        "manual_layout_checks": [
+                            {
+                                "item": "表格三线表格式",
+                                "reason": "表 3.1 用户数据表：检测到竖向边框，可能不是三线表。",
+                                "check_method": "在 Word/WPS 中打开该表，确认是否只保留顶线、表头下线和底线。",
+                                "risk_level": "medium",
+                                "table_index": 0,
+                                "caption": "表 3.1 用户数据表",
+                                "source": "deterministic_ooxml_table_border_check",
+                            }
+                        ],
+                        "rejected_or_unverified_claims": [],
+                    },
+                },
+                html_path,
+            )
+            html_text = html_path.read_text(encoding="utf-8")
+            self.assertIn("表 3.1 用户数据表", html_text)
+            self.assertIn("可能不是三线表", html_text)
+            # Should NOT show generic "三线表格式" alone but with specific table info
+            body = html_text.split("<details>")[0]
+            # The item "表格三线表格式" itself is fine; check reason has specific table info
+            self.assertIn("表 3.1", body)
+
+    # ---- HTML body Chinese-only test ----
+
+    def test_html_body_no_english_labels(self):
+        """HTML visible body (before foldable JSON) should not contain English field names."""
+        import tempfile
+        module = self.load_checker_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            html_path = Path(tmpdir) / "llm.html"
+            module.write_llm_review_separate_html(
+                {
+                    "provider": "dashscope",
+                    "model": "qwen-long",
+                    "actual_review_model": "qwen-long",
+                    "review": {
+                        "basis": {
+                            "review_mode": "qwen_long_fileid_docx",
+                            "document_upload_status": "ok",
+                            "fallback_used": False,
+                        },
+                        "overall_result": "needs_manual_review",
+                        "overall_risk": "low",
+                        "text_verified_issues": [
+                            {
+                                "type": "title_format",
+                                "severity": "medium",
+                                "page": "5",
+                                "evidence_exact_quote": "测试证据",
+                                "spec_basis": "规范",
+                                "suggestion": "修改建议",
+                            }
+                        ],
+                        "manual_layout_checks": [],
+                        "rejected_or_unverified_claims": [],
+                    },
+                },
+                html_path,
+            )
+            html_text = html_path.read_text(encoding="utf-8")
+            # Split before the first <details> (which contains the foldable JSON section)
+            body = html_text.split("<details>")[0]
+            # These English field names should NOT appear in the visible body
+            forbidden = [
+                "review_mode",
+                "target_docx_source",
+                "document_upload_status",
+                "fallback_used",
+                "overall_result",
+                "overall_risk",
+                "text_verified_issues",
+                "manual_layout_checks",
+                "rejected_or_unverified_claims",
+                "debug_warnings",
+                "read_check",
+                "evidence_exact_quote",
+                "spec_basis",
+            ]
+            for term in forbidden:
+                self.assertNotIn(term, body, f"HTML visible body must not contain '{term}'")
+            # True/False should not appear as bare words in visible body
+            self.assertNotIn("True", body)
+            self.assertNotIn("False", body)
+            # Risk levels should not appear as English
+            self.assertNotIn("low", body)
+            # But Chinese equivalents should appear
+            self.assertIn("审查结论", body)
+            self.assertIn("审查模式", body)
+            self.assertIn("是否使用回退审查", body)
+            self.assertIn("总体结论", body)
+            self.assertIn("总体风险", body)
+            self.assertIn("低", body)
+            self.assertIn("是", body)
+            self.assertIn("否", body)
+

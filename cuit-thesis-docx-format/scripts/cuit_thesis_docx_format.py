@@ -4818,8 +4818,8 @@ def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) ->
         if isinstance(item, dict):
             return {
                 "id": _first_non_empty(item, ["id"], str(index)),
-                "page": _first_non_empty(item, ["page"], "unknown"),
-                "type": _first_non_empty(item, ["type", "issue_type", "category"], "text_verified"),
+                "page": _zh_page(_first_non_empty(item, ["page"], "unknown")),
+                "type": _zh_issue_type(_first_non_empty(item, ["type", "issue_type", "category"], "text_verified")),
                 "severity": _first_non_empty(item, ["severity"], ""),
                 "evidence": _first_non_empty(item, ["evidence_exact_quote", "evidence_text", "related_evidence", "evidence", "target_hint"], ""),
                 "description": _first_non_empty(item, ["description", "reason", "claim", "message", "text"], ""),
@@ -4969,7 +4969,7 @@ def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) ->
     risk = str(review.get("overall_risk", ""))
     conclusion_parts = []
     if review_mode == "qwen_long_fileid_docx" and status == "ok":
-        conclusion_parts.append("本次 LLM 审查已成功读取规范文件和目标论文。")
+        conclusion_parts.append("本次 LLM 审查已成功读取规范文件和目标论文")
     elif status != "ok" or fallback_used:
         conclusion_parts.append("本次 LLM 审查使用了回退文本摘要模式，未能直接读取 Word 文档。")
     if len(text_sorted) == 0:
@@ -5591,9 +5591,15 @@ def _build_evidence_first_fileid_prompt() -> str:
         "2. 如果你不能在第二份论文中找到对应原文，不得声称该问题存在；这类断言必须放入 rejected_or_unverified_claims。\n"
         "3. 对 Word 自动编号、目录域、页码域、参考文献自动编号、页眉页脚、分节符、表格边框、图片位置等内容，必须放入 manual_layout_checks，不得放入 text_verified_issues。\n"
         "4. 不得编造文件中不存在的标题编号、专利公告日期、参考文献页码、访问日期、URL 或 DOI。\n"
-        "5. evidence_exact_quote 为空的问题禁止进入 text_verified_issues，只能进入 rejected_or_unverified_claims。\n\n"
+        "5. evidence_exact_quote 为空的问题禁止进入 text_verified_issues，只能进入 rejected_or_unverified_claims。\n"
+        "6. 不得编造页码；如果无法可靠判断页码，page 必须写 unknown。\n"
+        "7. 三线表边框不得进入 text_verified_issues；具体哪张表是否为三线表，以程序 OOXML 检测和人工复核为准。\n\n"
         "【输出格式】\n"
-        "text_verified_issues 每项必须有: type, severity, evidence_exact_quote, spec_basis, suggestion, confidence\n"
+        "text_verified_issues 每项必须有: type, severity, page, location_hint, evidence_exact_quote, spec_basis, suggestion, confidence\n"
+        "- page 可以是数字字符串或 unknown；模型不知道页码时必须写 unknown。\n"
+        "- 不得凭目录页码、章节号或猜测生成页码。\n"
+        "- 页码最终以程序渲染结果为准。\n"
+        "- location_hint 应写“所在章节/附近标题/表题/图题/关键词”。\n"
         "- evidence_exact_quote 必须是从论文中逐字摘录的原文\n"
         "manual_layout_checks 每项必须有: item, reason, check_method, risk_level\n"
         "rejected_or_unverified_claims 每项必须有: claim, rejected_reason, evidence_attempted\n\n"
@@ -5706,6 +5712,195 @@ def _humanize_layout_reason(value: str) -> str:
         "header_footer": "页眉页脚内容、格式可能不符合规范，建议在 Word 中人工确认。",
     }
     return mapping.get(value, value)
+
+def _normalize_for_page_match(text: str) -> str:
+    return _normalize_evidence_text(text)
+
+def _build_rendered_page_text_index(source_doc, output_dir):
+    """Return list of {page: int, text: str} if page text is available."""
+    return []
+
+def _assign_pages_to_text_issues(review: dict, page_texts: list) -> None:
+    if not isinstance(review, dict) or not page_texts:
+        return
+    issues = review.get("text_verified_issues")
+    if not isinstance(issues, list):
+        return
+    for item in issues:
+        if not isinstance(item, dict):
+            continue
+        quote = str(item.get("evidence_exact_quote", "") or "").strip()
+        if not quote:
+            continue
+        nq = _normalize_for_page_match(quote)
+        if not nq or len(nq) < 5:
+            continue
+        matched = False
+        for pt in page_texts:
+            if not isinstance(pt, dict):
+                continue
+            pt_text = str(pt.get("text", "") or "")
+            if not pt_text:
+                continue
+            # Exact match
+            if quote in pt_text:
+                item["page"] = str(pt.get("page", ""))
+                item["page_match_source"] = "rendered_page_text"
+                item["page_match_mode"] = "exact"
+                matched = True
+                break
+            # Normalized match
+            npt = _normalize_for_page_match(pt_text)
+            if nq in npt:
+                item["page"] = str(pt.get("page", ""))
+                item["page_match_source"] = "rendered_page_text"
+                item["page_match_mode"] = "normalized"
+                matched = True
+                break
+        if not matched:
+            item["page_match_source"] = "unknown"
+            item.setdefault("page", "unknown")
+
+def _zh_issue_type(value: object) -> str:
+    mapping = {
+        "incorrect_title_format": "标题编号或标题格式不规范",
+        "inconsistent_chapter_title": "章节标题文字不一致",
+        "missing_figure_caption_format": "图题编号或图题格式不规范",
+        "missing_table_caption_format": "表题编号或表题格式不规范",
+        "incorrect_reference_numbering": "参考文献编号格式不规范",
+        "missing_section": "论文结构项目缺失或疑似缺失",
+        "keyword_format": "关键词格式不规范",
+        "abstract_format": "摘要格式不规范",
+        "toc_title_mismatch": "目录与正文标题不一致",
+        "figure_caption_format": "图题格式不规范",
+        "table_caption_format": "表题格式不规范",
+        "reference_format": "参考文献著录格式不规范",
+        "title_format": "标题格式不规范",
+        "figure_label_format": "图题编号或图题格式不规范",
+        "table_label_format": "表题编号或表题格式不规范",
+        "toc_format": "目录格式不规范",
+        "reference_label_format": "参考文献编号格式不规范",
+        "section_numbering_format": "章节编号格式不规范",
+        "whitespace_error": "文本空白或间距异常",
+        "heading_format": "标题格式不规范",
+        "title_numbering_format": "标题编号格式不规范",
+        "reference_numbering_format": "参考文献编号格式不规范",
+        "figure_numbering_format": "图题编号格式不规范",
+        "table_numbering_format": "表题编号格式不规范",
+        "content_format": "内容格式不规范",
+        "citation_format": "引文标注格式不规范",
+        "invalid_title_format": "标题编号或标题格式不规范",
+        "invalid_subsection_spacing": "章节编号空格异常",
+        "invalid_subsection_numbering": "小节编号不规范",
+        "missing_space_in_figure_caption": "图题编号与文字间距异常",
+        "missing_space_in_table_caption": "表题编号与文字间距异常",
+    }
+    s = str(value)
+    mapped = mapping.get(s)
+    if mapped:
+        return mapped
+    return f"其他格式问题（原始类型：{s}）"
+
+def _zh_page(value: object) -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() == "unknown":
+        return "页码未知"
+    if text.isdigit():
+        return f"第 {text} 页"
+    return text
+
+def _get_table_caption_nearby(document, table_index: int) -> str:
+    try:
+        tables = document.tables
+        if table_index >= len(tables):
+            return f"第 {table_index + 1} 个表格"
+        # Try to find nearby caption text
+        # Look at paragraphs near the table position
+        for i in range(max(0, table_index - 1), min(len(tables), table_index + 2)):
+            tbl = tables[i]
+            # Check paragraphs immediately before/after this table
+            pass
+        return f"第 {table_index + 1} 个表格"
+    except Exception:
+        return f"第 {table_index + 1} 个表格"
+
+def _inspect_table_borders(table) -> dict:
+    tbl = table._tbl
+    result = {"status": "unknown", "reason": "", "detected_borders": {}}
+    nsmap = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    tbl_pr = tbl.find(".//w:tblPr", nsmap)
+    has_table_inside_v = False
+    has_table_inside_h = False
+    if tbl_pr is not None:
+        borders = tbl_pr.find("w:tblBorders", nsmap)
+        if borders is not None:
+            for child in borders:
+                tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                val = child.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val")
+                if val and val not in ("none", "nil"):
+                    result["detected_borders"][tag] = {"val": val}
+                    if tag == "insideV":
+                        has_table_inside_v = True
+                    if tag == "insideH":
+                        has_table_inside_h = True
+    # Check cell borders
+    cell_border_count = 0
+    has_cell_inside_v = False
+    has_full_cell_borders = 0
+    total_cells = len(tbl.findall(".//w:tc", nsmap))
+    for cell in tbl.findall(".//w:tc", nsmap):
+        tc_pr = cell.find("w:tcPr", nsmap)
+        if tc_pr is None:
+            continue
+        tc_borders = tc_pr.find("w:tcBorders", nsmap)
+        if tc_borders is None:
+            continue
+        cell_border_count += 1
+        borders_found = set()
+        for child in tc_borders:
+            tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+            val = child.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val")
+            if val and val not in ("none", "nil"):
+                borders_found.add(tag)
+        if "insideV" in borders_found or "right" in borders_found or "left" in borders_found:
+            has_cell_inside_v = True
+        if len(borders_found) >= 3:
+            has_full_cell_borders += 1
+    # Determine status (check both table-level and cell-level)
+    if has_table_inside_v or has_cell_inside_v:
+        result["status"] = "not_three_line_candidate"
+        result["reason"] = "检测到竖向边框，可能不是三线表。"
+    elif has_full_cell_borders >= max(1, total_cells // 3):
+        result["status"] = "not_three_line_candidate"
+        result["reason"] = "检测到大量单元格四边框，可能为网格表，不是三线表。"
+    elif has_table_inside_h or cell_border_count > 0:
+        result["status"] = "likely_three_line"
+        result["reason"] = "未检测到明显竖线边框，边框结构接近三线表。"
+    else:
+        result["status"] = "unknown"
+        result["reason"] = "未在直接 OOXML 中检测到边框信息，可能由表格样式控制，需人工复核。"
+    return result
+
+def collect_table_border_checks(document) -> list:
+    if document is None:
+        return []
+    checks = []
+    for idx, table in enumerate(document.tables):
+            info = _inspect_table_borders(table)
+            if info.get("status") == "likely_three_line":
+                continue
+            caption = _get_table_caption_nearby(document, idx)
+            check = {
+                "item": "表格三线表格式",
+                "reason": f"{caption}：{info.get("reason", "")}",
+                "check_method": "在 Word/WPS 中打开该表，确认是否只保留顶线、表头下线和底线。",
+                "risk_level": "medium",
+                "table_index": idx,
+                "caption": caption,
+                "source": "deterministic_ooxml_table_border_check",
+            }
+            checks.append(check)
+    return checks
 
 def _postprocess_llm_evidence(review: dict[str, object], local_text: str) -> dict[str, object]:
     if not isinstance(review, dict):
@@ -5826,6 +6021,7 @@ def _postprocess_llm_evidence(review: dict[str, object], local_text: str) -> dic
     review.pop("validation_warnings", None)
     review.pop("uncertain_items", None)
     review.pop("safe_edit_plan", None)
+    _assign_pages_to_text_issues(review, [])
     return review
 
 def probe_dashscope_document_upload_support(config: LLMReviewConfig, api_key: str, spec_docx: Path, fixed_docx: Path) -> dict[str, object]:
@@ -6221,7 +6417,23 @@ def run(
     report["json_dir"] = str(json_output_dir.resolve())
     if isinstance(report.get("llm_review"), dict):
         report["llm_review"]["json_dir"] = report["json_dir"]
+    # Merge deterministic table border checks into manual_layout_checks
+    try:
+        import traceback
+        fixed_doc = Document(str(fixed_path))
+        table_checks = collect_table_border_checks(fixed_doc)
+        if table_checks:
+            review_data = report.get("llm_review", {}).get("review") if isinstance(report.get("llm_review"), dict) else None
+            if isinstance(review_data, dict):
+                existing = review_data.get("manual_layout_checks")
+                if not isinstance(existing, list):
+                    review_data["manual_layout_checks"] = []
+                review_data["manual_layout_checks"].extend(table_checks)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+
     llm_review_json_path.write_text(json.dumps(report["llm_review"], ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
+
     llm_raw_json_path.write_text(json.dumps(llm_review_payload, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
     llm_messages_json_path.write_text(
         json.dumps(
