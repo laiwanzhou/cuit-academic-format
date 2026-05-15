@@ -3,6 +3,11 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
+
+SCRIPT_DIR = Path(__file__).resolve().parents[2] / "scripts"
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 from dashscope_doc_review import (
     get_default_client_from_env,
