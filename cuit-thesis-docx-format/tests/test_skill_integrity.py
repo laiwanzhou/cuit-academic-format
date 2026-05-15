@@ -581,9 +581,9 @@ class LLMReviewHtmlFallbackRenderTests(unittest.TestCase):
             )
             html_text = html_path.read_text(encoding="utf-8")
             self.assertIn("主链路尝试模型", html_text)
-            self.assertIn("实际生成审查内容模型", html_text)
+            self.assertIn("实际审查模型", html_text)
             self.assertIn("qwen3.6-plus", html_text)
-            self.assertIn("fallback_text", html_text)
+            self.assertIn("回退为文本摘要审查", html_text)
 
 
 
@@ -736,7 +736,7 @@ class LlmReviewHtmlModeMessagesTests(unittest.TestCase):
                 html_path,
             )
             html_text = html_path.read_text(encoding="utf-8")
-            self.assertIn("qwen-long 读取规范文件 file-id 和论文 file-id 后生成", html_text)
+            self.assertIn("已成功读取规范文件和目标论文", html_text)
             self.assertNotIn("本次未能通过 API 直接提交 Word 文档", html_text)
 
     def test_html_fallback_shows_correct_message(self):
@@ -765,7 +765,7 @@ class LlmReviewHtmlModeMessagesTests(unittest.TestCase):
             )
             html_text = html_path.read_text(encoding="utf-8")
             self.assertIn("fallback_summary", html_text)
-            self.assertIn("本次未能通过 API 直接提交 Word 文档", html_text)
+            self.assertIn("回退文本摘要模式", html_text)
             self.assertNotIn("qwen-long 读取规范文件 file-id 和论文 file-id 后生成", html_text)
 
 
@@ -845,7 +845,7 @@ class ManualReviewItemsFieldCompatibilityTests(unittest.TestCase):
             )
             html_text = html_path.read_text(encoding="utf-8")
             self.assertIn("未发现通过本地证据校验", html_text)
-            self.assertIn("manual_layout_checks", html_text)
+            self.assertIn("人工版式复核", html_text)
 
     def test_old_fields_still_compatible(self):
         import tempfile
