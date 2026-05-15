@@ -4841,22 +4841,55 @@ def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) ->
             "source": "",
         }
 
-    def _normalize_llm_manual_row(item: object, index: int) -> dict[str, str]:
-        return _normalize_llm_issue_row(item, index)
+    def _normalize_layout_row(item: object, index: int) -> dict[str, str]:
+        if isinstance(item, dict):
+            return {
+                "id": _first_non_empty(item, ["id"], str(index)),
+                "item": _first_non_empty(item, ["item", "type", "issue_type"], ""),
+                "reason": _first_non_empty(item, ["reason", "description", "suggestion"], ""),
+                "check_method": _first_non_empty(item, ["check_method", "verification_method", "source"], "在 Word 中打开文档后人工检查"),
+                "risk_level": _first_non_empty(item, ["risk_level", "severity"], ""),
+            }
+        return {
+            "id": str(index),
+            "item": str(item),
+            "reason": "请人工复核。",
+            "check_method": "在 Word 中打开文档后人工检查",
+            "risk_level": "",
+        }
+
+    def _normalize_rejected_row(item: object, index: int) -> dict[str, str]:
+        if isinstance(item, dict):
+            return {
+                "id": _first_non_empty(item, ["id"], str(index)),
+                "claim": _first_non_empty(item, ["claim", "reason", "description", "text"], ""),
+                "rejected_reason": _first_non_empty(item, ["rejected_reason", "reason"], ""),
+                "evidence_attempted": _first_non_empty(item, ["evidence_attempted", "related_evidence", "evidence_exact_quote"], ""),
+            }
+        return {
+            "id": str(index),
+            "claim": str(item),
+            "rejected_reason": "非结构化数据",
+            "evidence_attempted": "",
+        }
 
     review = llm_review.get("review") if isinstance(llm_review, dict) else {}
     review = review if isinstance(review, dict) else {}
     basis = review.get("basis") if isinstance(review.get("basis"), dict) else {}
     read_check = review.get("read_check") if isinstance(review.get("read_check"), dict) else {}
-    issues = review.get("issues") if isinstance(review.get("issues"), list) else []
-    manual_items = review.get("manual_review_items") if isinstance(review.get("manual_review_items"), list) else []
-    uncertain_items = review.get("uncertain_items") if isinstance(review.get("uncertain_items"), list) else []
-    safe_edit_plan = review.get("safe_edit_plan") if isinstance(review.get("safe_edit_plan"), list) else []
-    rejected_claims = review.get("rejected_claims") if isinstance(review.get("rejected_claims"), list) else []
-    validation_warnings = review.get("validation_warnings") if isinstance(review.get("validation_warnings"), list) else []
-    issues_normalized = [_normalize_llm_issue_row(item, idx) for idx, item in enumerate(issues, start=1)]
-    issues_sorted = sorted(issues_normalized, key=lambda x: x.get("page", "unknown"))
-    issue_rows = "".join(
+    text_issues = review.get("text_verified_issues") if isinstance(review.get("text_verified_issues"), list) else []
+    if not text_issues:
+        text_issues = review.get("issues") if isinstance(review.get("issues"), list) else []
+    layout_checks = review.get("manual_layout_checks") if isinstance(review.get("manual_layout_checks"), list) else []
+    if not layout_checks:
+        layout_checks = review.get("manual_review_items") if isinstance(review.get("manual_review_items"), list) else []
+    rejected_items = review.get("rejected_or_unverified_claims") if isinstance(review.get("rejected_or_unverified_claims"), list) else []
+    if not rejected_items:
+        rejected_items = review.get("rejected_claims") if isinstance(review.get("rejected_claims"), list) else []
+    debug_warnings = review.get("debug_warnings") if isinstance(review.get("debug_warnings"), list) else []
+    text_normalized = [_normalize_llm_issue_row(item, idx) for idx, item in enumerate(text_issues, start=1)]
+    text_sorted = sorted(text_normalized, key=lambda x: x.get("page", "unknown"))
+    text_rows = "".join(
         "<tr>"
         f"<td>{html.escape(it.get('id', ''))}</td>"
         f"<td>{html.escape(it.get('page', 'unknown'))}</td>"
@@ -4866,29 +4899,58 @@ def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) ->
         f"<td>{html.escape(it.get('spec_basis', ''))}</td>"
         f"<td class=\"prewrap\">{html.escape(it.get('suggestion', ''))}</td>"
         "</tr>"
-        for it in issues_sorted
+        for it in text_sorted
     )
-    if not issues_sorted:
-        issue_rows = (
+    if not text_sorted:
+        text_rows = (
             "<tr><td colspan=\"7\"><em>"
-            "没有通过本地证据校验的明确问题；"
-            "请查看 manual_review_items 中的人工复核建议。"
+            "未发现通过本地证据校验的文本型明确问题；"
+            "请查看 manual_layout_checks 和 rejected_or_unverified_claims。"
             "</em></td></tr>"
         )
-    manual_normalized = [_normalize_llm_manual_row(item, idx) for idx, item in enumerate(manual_items, start=1)]
-    manual_rows = "".join(
-        "<tr>"
-        f"<td>{html.escape(it.get('id', ''))}</td>"
-        f"<td>{html.escape(it.get('page', 'unknown'))}</td>"
-        f"<td>{html.escape(it.get('type', ''))}</td>"
-        f"<td>{html.escape(it.get('severity', ''))}</td>"
-        f"<td class=\"prewrap\">{html.escape(it.get('evidence', ''))}</td>"
-        f"<td class=\"prewrap\">{html.escape(it.get('description', ''))}</td>"
-        f"<td class=\"prewrap\">{html.escape(it.get('suggestion', ''))}</td>"
-        f"<td>{html.escape(it.get('source', ''))}</td>"
-        "</tr>"
-        for it in manual_normalized
+
+    layout_normalized = [_normalize_layout_row(item, idx) for idx, item in enumerate(layout_checks, start=1)]
+    if not layout_normalized:
+        layout_rows = (
+            "<tr><td colspan=\"5\"><em>"
+            "无需要人工复核的版式项目。"
+            "</em></td></tr>"
+        )
+    else:
+        layout_rows = "".join(
+            "<tr>"
+            f"<td>{html.escape(it.get('id', ''))}</td>"
+            f"<td class=\"prewrap\">{html.escape(it.get('item', ''))}</td>"
+            f"<td class=\"prewrap\">{html.escape(it.get('reason', ''))}</td>"
+            f"<td>{html.escape(it.get('check_method', ''))}</td>"
+            f"<td>{html.escape(it.get('risk_level', ''))}</td>"
+            "</tr>"
+            for it in layout_normalized
+        )
+
+    rejected_normalized = [_normalize_rejected_row(item, idx) for idx, item in enumerate(rejected_items, start=1)]
+    if not rejected_normalized:
+        rejected_rows_html = (
+            "<tr><td colspan=\"4\"><em>"
+            "无被拒绝或未证实的 LLM 断言。"
+            "</em></td></tr>"
+        )
+    else:
+        rejected_rows_html = "".join(
+            "<tr>"
+            f"<td>{html.escape(it.get('id', ''))}</td>"
+            f"<td class=\"prewrap\">{html.escape(it.get('claim', ''))}</td>"
+            f"<td>{html.escape(it.get('rejected_reason', ''))}</td>"
+            f"<td class=\"prewrap\">{html.escape(it.get('evidence_attempted', ''))}</td>"
+            "</tr>"
+            for it in rejected_normalized
+        )
+
+    debug_rows = "".join(
+        "<li>" + html.escape(str(item if not isinstance(item, dict) else item.get("warning", item.get("reason", str(item))))) + "</li>"
+        for item in debug_warnings
     )
+
     status = str(basis.get("document_upload_status", llm_review.get("document_upload_status", "failed")))
     fallback_used = bool(basis.get("fallback_used", llm_review.get("fallback_used", False)))
     fallback_reason = str(basis.get("fallback_reason", llm_review.get("fallback_reason", "")))
@@ -4911,31 +4973,6 @@ def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) ->
             "<p><strong>说明：</strong>qwen-long file-id 双文档审查失败，系统已回退为文本/结构化摘要审查；"
             "以下问题列表仍由 LLM 根据抽取出的规范文本、fixed 文档结构和确定性检查摘要生成。</p>"
         )
-    uncertain_rows = "".join(
-        "<tr>"
-        f"<td>{html.escape(str(idx))}</td>"
-        f"<td>{html.escape(str(item if not isinstance(item, dict) else item.get('reason', item.get('text', item.get('message', '')))))}</td>"
-        "</tr>"
-        for idx, item in enumerate(uncertain_items, start=1)
-    )
-    plan_rows = "".join(
-        "<tr>"
-        f"<td>{html.escape(str((item.get('operation') if isinstance(item, dict) else '')))}</td>"
-        f"<td>{html.escape(str((item.get('target_hint') if isinstance(item, dict) else '')))}</td>"
-        f"<td>{html.escape(str((item.get('risk', 'unknown') if isinstance(item, dict) else 'unknown')))}</td>"
-        f"<td>{html.escape(str((item.get('evidence_exact_quote', '') if isinstance(item, dict) else '')))}</td>"
-        f"<td>{html.escape(json.dumps(item.get('parameters', {}), ensure_ascii=False) if isinstance(item, dict) else '{}')}</td>"
-        "</tr>"
-        for item in safe_edit_plan
-    )
-    rejected_rows = "".join(
-        "<li>" + html.escape(str(item if not isinstance(item, dict) else item.get("reason", item.get("text", item)))) + "</li>"
-        for item in rejected_claims
-    )
-    warning_rows = "".join(
-        "<li>" + html.escape(str(item if not isinstance(item, dict) else item.get("warning", item.get("reason", item)))) + "</li>"
-        for item in validation_warnings
-    )
     raw_json = json.dumps(llm_review, ensure_ascii=False, indent=2)
     doc = f"""<!doctype html>
 <html lang="zh-CN">
@@ -4952,7 +4989,7 @@ td.prewrap {{ white-space: pre-wrap; word-break: break-word; }}
 </head>
 <body>
 <h1>LLM 格式审查与修改建议报告</h1>
-<p>该报告由千问根据格式指导书和目标论文生成，仅供人工复核；safe_edit_plan 只作为人工修改建议，不会自动执行。</p>
+<p>该报告由千问根据格式指导书和目标论文生成，仅供人工复核；不会自动执行修改。</p>
 <p><strong>主链路尝试模型：</strong>{html.escape(str(llm_review.get("provider", "")))} / {html.escape(doc_model_attempted)}</p>
 <p><strong>实际生成审查内容模型：</strong>{html.escape(str(llm_review.get("provider", "")))} / {html.escape(actual_review_model)}</p>
 <p><strong>review_mode：</strong>{html.escape(str(basis.get("review_mode", llm_review.get("mode", ""))))}</p>
@@ -4964,9 +5001,9 @@ td.prewrap {{ white-space: pre-wrap; word-break: break-word; }}
 <p><strong>回退原因：</strong>{html.escape(fallback_reason)}</p>
 <p><strong>overall_result：</strong>{html.escape(str(review.get("overall_result", "")))}</p>
 <p><strong>overall_risk：</strong>{html.escape(str(review.get("overall_risk", "")))}</p>
-<p><strong>issues 数量：</strong>{len(issues_sorted)}</p>
-<p><strong>manual_review_items 数量：</strong>{len(manual_normalized)}</p>
-<p><strong>validation_warnings 数量：</strong>{len(validation_warnings)}</p>
+<p><strong>text_verified_issues 数量：</strong>{len(text_sorted)}</p>
+<p><strong>manual_layout_checks 数量：</strong>{len(layout_normalized)}</p>
+<p><strong>rejected_or_unverified_claims 数量：</strong>{len(rejected_normalized)}</p>
 {fallback_note}
 {fallback_llm_note}
 <h2>读取验证 read_check</h2>
@@ -4978,23 +5015,23 @@ td.prewrap {{ white-space: pre-wrap; word-break: break-word; }}
 <tr><th>toc_evidence</th><td>{html.escape(str(read_check.get("toc_evidence", "")))}</td></tr>
 <tr><th>reference_numbering_observation</th><td>{html.escape(str(read_check.get("reference_numbering_observation", "")))}</td></tr>
 </tbody></table>
-<h2>问题列表</h2>
-<table><thead><tr><th>ID</th><th>页码</th><th>类型</th><th>严重度</th><th>证据</th><th>规范依据</th><th>建议</th></tr></thead><tbody>{issue_rows}</tbody></table>
-<h2>manual_review_items</h2>
-<p><em>说明：证据未通过本地校验或涉及 Word 域/版式风险的项目会进入 manual_review_items；这些项目不会自动修改，但仍需要人工查看。</em></p>
-<table><thead><tr><th>ID</th><th>页码</th><th>类型</th><th>严重度</th><th>证据</th><th>原因/描述</th><th>建议</th><th>来源</th></tr></thead><tbody>{manual_rows}</tbody></table>
-<h2>uncertain_items</h2>
-<table><thead><tr><th>#</th><th>内容</th></tr></thead><tbody>{uncertain_rows}</tbody></table>
-<h2>safe_edit_plan（仅建议，不自动执行）</h2>
-<table><thead><tr><th>operation</th><th>target_hint</th><th>risk</th><th>evidence_exact_quote</th><th>parameters</th></tr></thead><tbody>{plan_rows}</tbody></table>
-<h2>rejected_claims</h2>
-<ul>{rejected_rows}</ul>
-<h2 class="warn">validation_warnings</h2>
-<ul class="warn">{warning_rows}</ul>
+<h2>文本证据明确问题 text_verified_issues</h2>
+<p><em>说明：以下问题都经过了本地证据校验，evidence_exact_quote 在论文原文中可以找到。</em></p>
+<table><thead><tr><th>ID</th><th>页码</th><th>类型</th><th>严重度</th><th>证据</th><th>规范依据</th><th>建议</th></tr></thead><tbody>{text_rows}</tbody></table>
+<h2>需要人工版式复核 manual_layout_checks</h2>
+<p><em>说明：涉及页眉页脚、页码域、目录域、分节符、字体字号、图片位置、三线表等 Word 版式内容，需要在实际 Word 文档中人工检查。这些项目不会自动修改。</em></p>
+<table><thead><tr><th>ID</th><th>项目</th><th>原因</th><th>检查方式</th><th>风险等级</th></tr></thead><tbody>{layout_rows}</tbody></table>
+<h2>被拒绝/未证实的 LLM 判断 rejected_or_unverified_claims</h2>
+<p><em>说明：LLM 提出的以下断言因缺少 evidence_exact_quote、证据未在本地文档中找到、或涉及学术诚信等无法从文本证据确认的内容而被移至此处。这些项目不作为格式问题展示，仅供调试参考。</em></p>
+<table><thead><tr><th>ID</th><th>主张</th><th>拒绝原因</th><th>尝试证据</th></tr></thead><tbody>{rejected_rows_html}</tbody></table>
+<h2 class="warn">调试信息 debug_warnings</h2>
+<ul class="warn">{debug_rows}</ul>
+
 <details><summary>完整 JSON</summary><pre>{html.escape(raw_json)}</pre></details>
 </body>
 </html>"""
     path.write_text(doc, encoding="utf-8")
+
 
 
 def stdout_json(report: dict[str, object]) -> str:
@@ -5481,7 +5518,7 @@ def _build_llm_user_prompt(candidates: dict[str, object], *, fallback_used: bool
 
 def _build_evidence_first_fileid_prompt() -> str:
     return json.dumps({
-        "llm_review_version": "6.0",
+        "llm_review_version": "7.0",
         "provider": "dashscope",
         "model": "qwen-long",
         "read_check": {
@@ -5502,26 +5539,46 @@ def _build_evidence_first_fileid_prompt() -> str:
         },
         "overall_result": "pass|needs_manual_review|needs_fix",
         "overall_risk": "low|medium|high",
-        "issues": [],
-        "manual_review_items": [],
-        "uncertain_items": [],
-        "safe_edit_plan": [],
-        "rejected_claims": [],
-        "validation_warnings": [],
+        "text_verified_issues": [],
+        "manual_layout_checks": [],
+        "rejected_or_unverified_claims": [],
         "notes": [],
-    }, ensure_ascii=False) + ("\n\n"
+    }, ensure_ascii=False) + (
+        "\n\n"
         "请严格依据第一份《成都信息工程大学学士学位论文规范》审查第二份论文文档。\n\n"
+        "【审查范围 — 只做文本证据型格式审查】\n"
+        "只检查以下内容：\n"
+        "- 论文结构完整性\n"
+        "- 摘要/关键词存在性\n"
+        "- 目录标题层级文本\n"
+        "- 目录与正文标题明显一致性\n"
+        "- 图题/表题文本格式\n"
+        "- 参考文献文本编号和著录基本格式\n"
+        "- 明显异常空格或标题文本异常\n\n"
+        "【明确禁止判断的内容 — 必须放入 manual_layout_checks 或 rejected_or_unverified_claims】\n"
+        "- 页眉页脚是否实际显示\n"
+        "- 页码域\n"
+        "- 目录是否自动生成\n"
+        "- 分节符\n"
+        "- 三线表边框\n"
+        "- 图片位置\n"
+        "- 字体字号\n"
+        "- 学术诚信/抄袭\n"
+        "- 外部专利日期、URL、DOI\n\n"
         "【极其重要的证据规则】\n"
-        "1. 每一个“明确不符合规范的问题”都必须给出第二份论文中的逐字原文证据。\n"
-        "2. 如果你不能在第二份论文中找到对应原文，不得声称该问题存在。\n"
-        "3. 对 Word 自动编号、目录域、页码域、参考文献自动编号、页眉页脚、分节符、表格边框、图片位置等内容，如果无法从文档文本中可靠判断，必须放入 manual_review_items，不得放入 issues。\n"
-        "4. 不得编造文件中不存在的标题编号，例如不得在没有证据时声称出现“1.a”“1.b”。\n"
-        "5. 不得编造专利公告日期、参考文献页码、访问日期、URL 或 DOI。\n"
-        "6. 对参考文献编号要特别谨慎：Word 自动编号可能不会作为段落正文被抽取。如果你无法确认编号显示样式，只能列为人工复核；不得直接断言“未使用[1][2]编号”。\n"
-        "7. evidence_found=false 的项目禁止进入 issues，只能进入 manual_review_items 或 uncertain_items。\n"
-        "8. 如果发现问题，请说明你是从“论文原文证据”判断，还是从“版式/域/自动编号风险”推断。\n\n"
+        "1. 每一个 text_verified_issues 中的问题必须给出第二份论文中的逐字原文证据。\n"
+        "2. 如果你不能在第二份论文中找到对应原文，不得声称该问题存在；这类断言必须放入 rejected_or_unverified_claims。\n"
+        "3. 对 Word 自动编号、目录域、页码域、参考文献自动编号、页眉页脚、分节符、表格边框、图片位置等内容，必须放入 manual_layout_checks，不得放入 text_verified_issues。\n"
+        "4. 不得编造文件中不存在的标题编号、专利公告日期、参考文献页码、访问日期、URL 或 DOI。\n"
+        "5. evidence_exact_quote 为空的问题禁止进入 text_verified_issues，只能进入 rejected_or_unverified_claims。\n\n"
+        "【输出格式】\n"
+        "text_verified_issues 每项必须有: type, severity, evidence_exact_quote, spec_basis, suggestion, confidence\n"
+        "- evidence_exact_quote 必须是从论文中逐字摘录的原文\n"
+        "manual_layout_checks 每项必须有: item, reason, check_method, risk_level\n"
+        "rejected_or_unverified_claims 每项必须有: claim, rejected_reason, evidence_attempted\n\n"
         "只输出 JSON，不要输出 Markdown，不要包裹 `json 代码块。"
     )
+
 
 def _docx_plain_text_for_evidence(path: Path) -> str:
     if not path.exists() or not path.is_file() or path.suffix.lower() != ".docx":
@@ -5543,60 +5600,91 @@ def _docx_plain_text_for_evidence(path: Path) -> str:
 def _postprocess_llm_evidence(review: dict[str, object], local_text: str) -> dict[str, object]:
     if not isinstance(review, dict):
         return review
-    warnings = review.get("validation_warnings") if isinstance(review.get("validation_warnings"), list) else []
-    manual = review.get("manual_review_items") if isinstance(review.get("manual_review_items"), list) else []
-    issues = review.get("issues") if isinstance(review.get("issues"), list) else []
-    safe_plan = review.get("safe_edit_plan") if isinstance(review.get("safe_edit_plan"), list) else []
-    kept_issues: list[object] = []
     lowered = local_text or ""
-    for item in issues:
+
+    text_issues = review.get("text_verified_issues") if isinstance(review.get("text_verified_issues"), list) else []
+    old_issues = review.get("issues") if isinstance(review.get("issues"), list) else []
+    old_manual = review.get("manual_review_items") if isinstance(review.get("manual_review_items"), list) else []
+
+    if old_issues and not text_issues:
+        text_issues = old_issues
+    layout_checks = review.get("manual_layout_checks") if isinstance(review.get("manual_layout_checks"), list) else []
+    if old_manual:
+        layout_checks.extend(old_manual)
+    rejected = review.get("rejected_or_unverified_claims") if isinstance(review.get("rejected_or_unverified_claims"), list) else []
+    old_rejected = review.get("rejected_claims") if isinstance(review.get("rejected_claims"), list) else []
+    if old_rejected:
+        rejected.extend(old_rejected)
+
+    layout_keywords = [
+        "页眉", "页脚", "页码", "分节符",
+        "目录域", "TOC", "toc", "自动生成目录", "自动编号",
+        "三线表", "section break",
+        "字体", "字号", "font",
+        "图片位置", "图片大小", "图片高度",
+        "边框", "页边距", "行距",
+    ]
+
+    kept_text: list[object] = []
+    debug_warnings: list[str] = []
+
+    for item in text_issues:
         if not isinstance(item, dict):
-            manual.append({"reason": str(item), "suggestion": "请人工复核。"})
-            warnings.append("issue 非结构化，已转入 manual_review_items。")
+            rejected.append({"claim": str(item), "rejected_reason": "issue 非结构化", "evidence_attempted": ""})
             continue
-        evidence_found = item.get("evidence_found", True)
         quote = str(item.get("evidence_exact_quote", "") or "").strip()
-        if evidence_found is not True:
-            manual.append({"reason": f"evidence_found!=true: {item.get('id', '')}", "suggestion": str(item.get("suggestion", "请人工复核。")), "related_evidence": quote})
-            warnings.append(f"issue {item.get('id', '')} evidence_found!=true，已转人工复核。")
+        desc = str(item.get("description", item.get("type", "")) or "")
+        combined = (desc + " " + quote).lower()
+
+        is_layout = any(kw in combined for kw in layout_keywords)
+        if is_layout:
+            layout_checks.append({
+                "item": item.get("type", item.get("id", "")),
+                "reason": desc or quote or str(item.get("suggestion", "")),
+                "check_method": "在 Word 中打开文档后人工检查",
+                "risk_level": item.get("severity", "medium"),
+            })
             continue
+
+        integrity_keywords = ["抄袭", "学术诚信", "引文标注", "未引用", "涉嫌[", "学术不端"]
+        if any(kw in combined for kw in integrity_keywords):
+            rejected.append({
+                "claim": desc or str(item.get("id", "")),
+                "rejected_reason": "涉及学术诚信断言但无确定性证据",
+                "evidence_attempted": quote if quote else "无",
+            })
+            continue
+
         if not quote:
-            manual.append({"reason": f"evidence_exact_quote 为空: {item.get('id', '')}", "suggestion": str(item.get("suggestion", "请人工复核。"))})
-            warnings.append(f"issue {item.get('id', '')} 无 evidence_exact_quote，已转人工复核。")
+            rejected.append({
+                "claim": desc or str(item.get("id", "")),
+                "rejected_reason": "evidence_exact_quote 为空",
+                "evidence_attempted": str(item.get("suggestion", ""))[:200],
+            })
+            debug_warnings.append(f"issue {item.get('id', '')} evidence_exact_quote 为空，转入 rejected_or_unverified_claims")
             continue
+
         if quote not in lowered:
-            manual.append({"reason": f"本地未命中证据引用: {item.get('id', '')}", "suggestion": str(item.get("suggestion", "请人工复核。")), "related_evidence": quote})
-            warnings.append(f"issue {item.get('id', '')} 的 evidence_exact_quote 未在本地文档中找到，已转人工复核。")
+            rejected.append({
+                "claim": desc or str(item.get("id", "")),
+                "rejected_reason": "本地未命中 evidence_exact_quote",
+                "evidence_attempted": quote[:300],
+            })
+            debug_warnings.append(f"issue {item.get('id', '')} 的 evidence_exact_quote 未在本地文档中找到，转入 rejected_or_unverified_claims")
             continue
-        kept_issues.append(item)
 
-    for pattern in ["1.a", "1.b", "2.a", "2.b", "2022-05-10"]:
-        if pattern in json.dumps(review, ensure_ascii=False) and pattern not in lowered:
-            warnings.append(f"检测到高风险可疑模式 {pattern}，但本地文档无证据命中。")
+        kept_text.append(item)
 
-    normalized_plan: list[dict[str, object]] = []
-    for item in safe_plan:
-        if not isinstance(item, dict):
-            warnings.append("safe_edit_plan 含非结构化项，已忽略。")
-            continue
-        risk = str(item.get("risk", "low")).lower()
-        quote = str(item.get("evidence_exact_quote", "") or "")
-        if risk != "low":
-            item["can_auto_fix"] = False
-            item["blocked_reason"] = "risk_not_low"
-        elif quote and quote not in lowered:
-            item["can_auto_fix"] = False
-            item["blocked_reason"] = "evidence_not_found_locally"
-            warnings.append(f"safe_edit_plan {item.get('id', '')} 本地证据未命中，标记为不可自动执行。")
-        else:
-            item["can_auto_fix"] = False
-            item["blocked_reason"] = "llm_plan_not_auto_applied"
-        normalized_plan.append(item)
-
-    review["issues"] = kept_issues
-    review["manual_review_items"] = manual
-    review["safe_edit_plan"] = normalized_plan
-    review["validation_warnings"] = warnings
+    review["text_verified_issues"] = kept_text
+    review["manual_layout_checks"] = layout_checks
+    review["rejected_or_unverified_claims"] = rejected
+    review["debug_warnings"] = debug_warnings
+    review.pop("issues", None)
+    review.pop("manual_review_items", None)
+    review.pop("rejected_claims", None)
+    review.pop("validation_warnings", None)
+    review.pop("uncertain_items", None)
+    review.pop("safe_edit_plan", None)
     return review
 
 
@@ -6002,6 +6090,13 @@ def run(
                 "model": llm_review_obj.get("model", ""),
                 "actual_review_model": llm_review_obj.get("actual_review_model", ""),
                 "basis": llm_review_payload.get("basis", {}) if isinstance(llm_review_payload, dict) else {},
+                "_prompt_source": "_build_evidence_first_fileid_prompt",
+                "user_prompt": _build_evidence_first_fileid_prompt(),
+                "system_prompt": "你是一个严格、谨慎、以证据为中心的本科毕业论文格式审查助手。接下来会提供两份文档：第一份是学校论文格式规范，第二份是待审查论文。你必须依据第一份规范审查第二份论文。如果没有证据，不得编造问题。",
+                "file_ids": {
+                    "spec": "fileid://REDACTED_SPEC",
+                    "target": "fileid://REDACTED_TARGET",
+                },
             },
             ensure_ascii=False,
             indent=2,

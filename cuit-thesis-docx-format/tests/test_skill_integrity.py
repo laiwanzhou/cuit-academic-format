@@ -618,10 +618,11 @@ class LightweightFileIdPromptTests(unittest.TestCase):
         prompt = module._build_evidence_first_fileid_prompt()
         required = [
             "证据规则",
-            "evidence_found",
+            "text_verified_issues",
             "逐字原文证据",
-            "manual_review_items",
+            "manual_layout_checks",
             "不得编造",
+            "rejected_or_unverified_claims",
         ]
         for term in required:
             self.assertIn(term, prompt, f"Lightweight prompt must contain '{term}'")
@@ -631,7 +632,7 @@ class LightweightFileIdPromptTests(unittest.TestCase):
         module = self.load_checker_module()
         prompt = module._build_evidence_first_fileid_prompt()
         self.assertTrue(prompt.strip().startswith("{"), "Prompt should start with JSON schema")
-        self.assertIn('"issues"', prompt[:2000])
+        self.assertIn('"text_verified_issues"', prompt[:2000])
 
 
 class QwenLongPromptSeparationTests(unittest.TestCase):
@@ -843,8 +844,8 @@ class ManualReviewItemsFieldCompatibilityTests(unittest.TestCase):
                 html_path,
             )
             html_text = html_path.read_text(encoding="utf-8")
-            self.assertIn("没有通过本地证据校验", html_text)
-            self.assertIn("manual_review_items", html_text)
+            self.assertIn("未发现通过本地证据校验", html_text)
+            self.assertIn("manual_layout_checks", html_text)
 
     def test_old_fields_still_compatible(self):
         import tempfile
@@ -903,5 +904,5 @@ class ManualReviewItemsFieldCompatibilityTests(unittest.TestCase):
                 html_path,
             )
             html_text = html_path.read_text(encoding="utf-8")
-            self.assertIn("证据未通过本地校验", html_text)
-            self.assertIn("仍需要人工查看", html_text)
+            self.assertIn("需要在实际 Word 文档中人工检查", html_text)
+            self.assertIn("不会自动执行修改", html_text)

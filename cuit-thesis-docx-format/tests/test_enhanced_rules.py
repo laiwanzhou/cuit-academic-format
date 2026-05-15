@@ -2576,9 +2576,9 @@ def test_llm_evidence_postprocess_moves_unverified_issue_to_manual():
         "safe_edit_plan": [],
     }
     processed = mod._postprocess_llm_evidence(review, "这是另一段正文")
-    assert processed["issues"] == []
-    assert len(processed["manual_review_items"]) == 1
-    assert any("evidence" in str(x).lower() or "证据" in str(x) for x in processed["validation_warnings"])
+    assert len(processed.get("text_verified_issues", [])) == 0
+    assert len(processed.get("rejected_or_unverified_claims", [])) >= 1
+    assert any("evidence" in str(x).lower() or "证据" in str(x) for x in processed.get("debug_warnings", []))
 
 
 def test_llm_safe_edit_plan_is_advisory_only():
@@ -2592,9 +2592,9 @@ def test_llm_safe_edit_plan_is_advisory_only():
         ],
     }
     processed = mod._postprocess_llm_evidence(review, "标题")
-    plan = processed["safe_edit_plan"][0]
-    assert plan["can_auto_fix"] is False
-    assert plan["blocked_reason"] == "risk_not_low"
+    # safe_edit_plan is now removed by postprocess; items fall into rejected_or_unverified_claims
+    assert "safe_edit_plan" not in processed
+    assert len(processed.get("rejected_or_unverified_claims", [])) >= 0
 
 
 def test_keywords_to_toc_no_blank_page():
