@@ -27,13 +27,13 @@
 ## 快速运行
 
 ```powershell
-python cuit-thesis-docx-format/scripts/cuit_thesis_docx_format.py thesis.docx --output-dir ./res --renderer auto --screenshots auto
+python cuit-thesis-docx-format/scripts/cuit_thesis_docx_format.py thesis.docx --output-dir ./res6 --renderer auto --screenshots auto
 ```
 
 批量运行：
 
 ```powershell
-python cuit-thesis-docx-format/scripts/run_batch_matrix.py "a.docx" "b.docx" --output-dir "./resx" --renderer ooxml --screenshots auto
+python cuit-thesis-docx-format/scripts/run_batch_matrix.py "a.docx" "b.docx" --output-dir "./res6" --renderer ooxml --screenshots auto
 ```
 
 ## 环境检查
@@ -108,16 +108,16 @@ OOXML-only 模式下，页码/页眉页脚/分节等高风险布局修复默认�
 9. 用规范文件检查论文：
    `python cuit-thesis-docx-format/examples/dashscope/revise_docx_with_uploaded_spec.py --spec-file-id file-fe-规范文件 --target-docx thesis.docx --output result.md`
 10. 在主流程启用 LLM 审查（建议报告模式，不自动改 Word）：
-    `python cuit-thesis-docx-format/scripts/cuit_thesis_docx_format.py thesis.docx --output-dir ./resx --renderer ooxml --screenshots never --llm-review --llm-review-spec-file-id file-fe-xxx --llm-doc-model qwen-long --llm-review-timeout 600`
+    `python cuit-thesis-docx-format/scripts/cuit_thesis_docx_format.py thesis.docx --output-dir ./res6 --renderer ooxml --screenshots never --llm-review --llm-review-spec-file-id file-fe-xxx --llm-doc-model qwen-long --llm-review-timeout 600`
 
-启用 LLM 后输出结构：
+启用 LLM 后输出结构（--output-dir 可以任意指定，示例使用 ./res6）：
 
-- `resx/<stem>_format_comments_*.docx`
-- `resx/<stem>_format_fixed_*.docx`
-- `resx/<stem>_format_report_*.html`
-- `resx/<stem>_llm_review_*.html`
-- `resx/json/<stem>_format_report_*.json`
-- `resx/json/<stem>_llm_review_*.json`
+- `<output-dir>/<stem>_format_comments_*.docx`
+- `<output-dir>/<stem>_format_fixed_*.docx`
+- `<output-dir>/<stem>_format_report_*.html`
+- `<output-dir>/<stem>_llm_review_*.html`
+- `<output-dir>/json/<stem>_format_report_*.json`
+- `<output-dir>/json/<stem>_llm_review_*.json`
 
 说明：
 

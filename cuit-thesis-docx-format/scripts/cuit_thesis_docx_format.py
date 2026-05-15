@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Check and fix bachelor thesis DOCX formatting."""
 
 from __future__ import annotations
@@ -4866,6 +4866,7 @@ def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) ->
     status = str(basis.get("document_upload_status", llm_review.get("document_upload_status", "failed")))
     fallback_used = bool(basis.get("fallback_used", llm_review.get("fallback_used", False)))
     fallback_reason = str(basis.get("fallback_reason", llm_review.get("fallback_reason", "")))
+    review_mode = str(basis.get("review_mode", llm_review.get("mode", "")))
     doc_model_attempted = str(
         basis.get("doc_model_attempted", llm_review.get("doc_model_attempted", llm_review.get("model", "")))
     )
@@ -4874,8 +4875,10 @@ def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) ->
         llm_review.get("actual_review_model", fallback_model if fallback_used and fallback_model else llm_review.get("model", ""))
     )
     fallback_note = ""
-    if status != "ok":
-        fallback_note = "<p><strong>本次未能通过 API 直接提交 Word 文档，已回退为文本/结构化摘要审查。</strong></p>"
+    if review_mode == "qwen_long_fileid_docx" and status == "ok":
+        fallback_note = "<p><strong>当前报告由 qwen-long 读取规范文件 file-id 和论文 file-id 后生成。</strong></p>"
+    elif status != "ok" or fallback_used:
+        fallback_note = "<p><strong>本次未能通过 API 直接提交 Word 文档，已回退为文本/结构化摘要审查。当前报告不是 LLM 独立读取 Word 后生成，而是 fallback_summary。</strong></p>"
     fallback_llm_note = ""
     if fallback_used:
         fallback_llm_note = (
@@ -5447,6 +5450,51 @@ def _build_llm_user_prompt(candidates: dict[str, object], *, fallback_used: bool
     )
 
 
+
+def _build_evidence_first_fileid_prompt() -> str:
+    return json.dumps({
+        "llm_review_version": "6.0",
+        "provider": "dashscope",
+        "model": "qwen-long",
+        "read_check": {
+            "spec_file_read": True,
+            "target_file_read": True,
+            "title": "",
+            "keywords": "",
+            "toc_evidence": "",
+            "reference_numbering_observation": "",
+        },
+        "basis": {
+            "spec_file_read": True,
+            "target_file_read": True,
+            "review_mode": "qwen_long_fileid_docx",
+            "document_upload_status": "ok",
+            "fallback_used": False,
+            "fallback_reason": "",
+        },
+        "overall_result": "pass|needs_manual_review|needs_fix",
+        "overall_risk": "low|medium|high",
+        "issues": [],
+        "manual_review_items": [],
+        "uncertain_items": [],
+        "safe_edit_plan": [],
+        "rejected_claims": [],
+        "validation_warnings": [],
+        "notes": [],
+    }, ensure_ascii=False) + ("\n\n"
+        "请严格依据第一份《成都信息工程大学学士学位论文规范》审查第二份论文文档。\n\n"
+        "【极其重要的证据规则】\n"
+        "1. 每一个“明确不符合规范的问题”都必须给出第二份论文中的逐字原文证据。\n"
+        "2. 如果你不能在第二份论文中找到对应原文，不得声称该问题存在。\n"
+        "3. 对 Word 自动编号、目录域、页码域、参考文献自动编号、页眉页脚、分节符、表格边框、图片位置等内容，如果无法从文档文本中可靠判断，必须放入 manual_review_items，不得放入 issues。\n"
+        "4. 不得编造文件中不存在的标题编号，例如不得在没有证据时声称出现“1.a”“1.b”。\n"
+        "5. 不得编造专利公告日期、参考文献页码、访问日期、URL 或 DOI。\n"
+        "6. 对参考文献编号要特别谨慎：Word 自动编号可能不会作为段落正文被抽取。如果你无法确认编号显示样式，只能列为人工复核；不得直接断言“未使用[1][2]编号”。\n"
+        "7. evidence_found=false 的项目禁止进入 issues，只能进入 manual_review_items 或 uncertain_items。\n"
+        "8. 如果发现问题，请说明你是从“论文原文证据”判断，还是从“版式/域/自动编号风险”推断。\n\n"
+        "只输出 JSON，不要输出 Markdown，不要包裹 `json 代码块。"
+    )
+
 def _docx_plain_text_for_evidence(path: Path) -> str:
     if not path.exists() or not path.is_file() or path.suffix.lower() != ".docx":
         return ""
@@ -5535,7 +5583,7 @@ def probe_dashscope_document_upload_support(config: LLMReviewConfig, api_key: st
             return {
                 "supported": True,
                 "method": "file_upload",
-                "file_ids": {"spec": str(spec_file_id), "fixed": str(fixed_file_id)},
+                "file_ids": {"spec": str(spec_file_id), "target": str(fixed_file_id)},
             }
         return {"supported": False, "method": "fallback_text_extraction", "reason": "missing_file_id"}
     except Exception as exc:
@@ -5554,23 +5602,23 @@ def run_qwen_docx_review(*, config: LLMReviewConfig, api_key: str, candidates: d
     fallback_reason = "" if upload_ok else str(probe.get("reason", "upload_not_supported"))
     doc_model_error_type = ""
     doc_model_error_message = ""
-    prompt = _build_llm_user_prompt(candidates, fallback_used=fallback_used)
-
     raw_text = ""
     if upload_ok:
         file_ids = probe.get("file_ids", {})
+        target_id = str(file_ids.get("target") or file_ids.get("fixed", ""))
+        fileid_prompt = _build_evidence_first_fileid_prompt()
         try:
             raw_text = run_qwen_long_docx_review(
                 client=client,
                 spec_file_id=str(file_ids.get("spec", "")),
-                target_file_id=str(file_ids.get("fixed", "")),
+                target_file_id=target_id,
                 model=config.doc_model,
-                user_prompt=prompt,
+                user_prompt=fileid_prompt,
                 timeout_seconds=config.timeout,
             )
-            if config.delete_uploaded_target_after_review and str(file_ids.get("fixed", "")):
+            if config.delete_uploaded_target_after_review and target_id:
                 try:
-                    dashscope_delete_uploaded_file(client, str(file_ids.get("fixed", "")))
+                    dashscope_delete_uploaded_file(client, target_id)
                 except Exception:
                     pass
         except Exception as exc:
@@ -5580,13 +5628,14 @@ def run_qwen_docx_review(*, config: LLMReviewConfig, api_key: str, candidates: d
             doc_model_error_type = exc.__class__.__name__
             doc_model_error_message = str(exc)[:1000]
     if not raw_text:
+        fallback_prompt = _build_llm_user_prompt(candidates, fallback_used=True)
         payload = call_openai_compatible_chat(
             base_url=config.base_url,
             api_key=api_key,
             model=config.review_model,
             messages=[
                 {"role": "system", "content": LLM_REVIEW_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": fallback_prompt},
             ],
             timeout=config.timeout,
         )
@@ -5624,7 +5673,7 @@ def run_qwen_docx_review(*, config: LLMReviewConfig, api_key: str, candidates: d
     basis["doc_model_fixed_docx_name"] = target_docx.name if target_docx else ""
     basis["target_file_read"] = upload_ok or fallback_used
     basis["spec_file_read"] = bool(config.spec_file_id or (spec_docx and spec_docx.exists()))
-    basis["review_mode"] = "fileid_docx"
+    basis["review_mode"] = "qwen_long_fileid_docx" if upload_ok and not fallback_used else "fallback_summary"
     basis["model"] = config.doc_model
     basis.setdefault("spec_name", spec_docx.name if spec_docx else "")
     basis.setdefault("fixed_docx_name", target_docx.name if target_docx else "")

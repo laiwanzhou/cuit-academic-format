@@ -584,3 +584,185 @@ class LLMReviewHtmlFallbackRenderTests(unittest.TestCase):
             self.assertIn("实际生成审查内容模型", html_text)
             self.assertIn("qwen3.6-plus", html_text)
             self.assertIn("fallback_text", html_text)
+
+
+
+class LightweightFileIdPromptTests(unittest.TestCase):
+    def load_checker_module(self):
+        module_path = ROOT / "scripts" / "cuit_thesis_docx_format.py"
+        spec = importlib.util.spec_from_file_location("cuit_thesis_docx_format", module_path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        return module
+
+    def test_evidence_first_prompt_excludes_long_text_fields(self):
+        """_build_evidence_first_fileid_prompt must not contain long text fields."""
+        module = self.load_checker_module()
+        prompt = module._build_evidence_first_fileid_prompt()
+        forbidden = [
+            "spec_text=",
+            "target_docx_structure=",
+            "deterministic_summary=",
+            "risk_summary=",
+            "fixed_docx_structure",
+            "Specification text",
+            "High risk findings",
+        ]
+        for term in forbidden:
+            self.assertNotIn(term, prompt, f"Lightweight prompt must not contain '{term}'")
+
+    def test_lightweight_prompt_contains_evidence_rules(self):
+        """Lightweight prompt should contain evidence-first instructions."""
+        module = self.load_checker_module()
+        prompt = module._build_evidence_first_fileid_prompt()
+        required = [
+            "证据规则",
+            "evidence_found",
+            "逐字原文证据",
+            "manual_review_items",
+            "不得编造",
+        ]
+        for term in required:
+            self.assertIn(term, prompt, f"Lightweight prompt must contain '{term}'")
+
+    def test_lightweight_prompt_returns_valid_json_prefix(self):
+        """Lightweight prompt starts with JSON schema."""
+        module = self.load_checker_module()
+        prompt = module._build_evidence_first_fileid_prompt()
+        self.assertTrue(prompt.strip().startswith("{"), "Prompt should start with JSON schema")
+        self.assertIn('"issues"', prompt[:2000])
+
+
+class QwenLongPromptSeparationTests(unittest.TestCase):
+    def load_checker_module(self):
+        module_path = ROOT / "scripts" / "cuit_thesis_docx_format.py"
+        spec = importlib.util.spec_from_file_location("cuit_thesis_docx_format", module_path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        return module
+
+    def test_build_llm_user_prompt_is_only_for_fallback(self):
+        """_build_llm_user_prompt must contain long text fields (for fallback use only)."""
+        module = self.load_checker_module()
+        prompt = module._build_llm_user_prompt(
+            {
+                "spec_text": "test spec",
+                "summary": {},
+                "table_risks": [],
+                "figure_risks": [],
+                "blank_or_page_risks": [],
+            },
+            fallback_used=True,
+        )
+        self.assertIn("spec_text=", prompt)
+        self.assertIn("deterministic_summary=", prompt)
+
+    def test_review_mode_qwen_long_vs_fallback(self):
+        """Verify review_mode is set correctly for each path."""
+        import tempfile
+        module = self.load_checker_module()
+        with tempfile.TemporaryDirectory() as td:
+            spec = Path(td) / "spec.docx"
+            fixed = Path(td) / "fixed.docx"
+            spec.write_bytes(b"pk")
+            fixed.write_bytes(b"pk")
+
+            # Case 1: upload fails -> fallback_summary
+            module.probe_dashscope_document_upload_support = lambda *_a, **_k: {
+                "supported": False,
+                "reason": "upload_error",
+            }
+            module.call_openai_compatible_chat = lambda **_k: {
+                "choices": [{"message": {"content": '{"overall_result":"needs_manual_review","overall_risk":"medium","basis":{}}'}}]
+            }
+            out = module.run_qwen_docx_review(
+                config=module.LLMReviewConfig(enabled=True),
+                api_key="k",
+                candidates={"spec_docx_path": str(spec), "summary": {"fixed_docx": str(fixed)}},
+            )
+            self.assertEqual(out["status"], "ok")
+            self.assertEqual(out["review"]["basis"]["review_mode"], "fallback_summary")
+
+            # Case 2: upload succeeds -> qwen_long_fileid_docx
+            module.probe_dashscope_document_upload_support = lambda *_a, **_k: {
+                "supported": True,
+                "method": "file_upload",
+                "file_ids": {"spec": "file-fe-spec", "target": "file-fe-target"},
+            }
+            module.run_qwen_long_docx_review = lambda **_k: '{"overall_result":"pass","overall_risk":"low","basis":{}}'
+            out = module.run_qwen_docx_review(
+                config=module.LLMReviewConfig(enabled=True),
+                api_key="k",
+                candidates={"spec_docx_path": str(spec), "summary": {"fixed_docx": str(fixed)}},
+            )
+            self.assertEqual(out["status"], "ok")
+            self.assertEqual(out["review"]["basis"]["review_mode"], "qwen_long_fileid_docx")
+
+
+class LlmReviewHtmlModeMessagesTests(unittest.TestCase):
+    def load_checker_module(self):
+        module_path = ROOT / "scripts" / "cuit_thesis_docx_format.py"
+        spec = importlib.util.spec_from_file_location("cuit_thesis_docx_format", module_path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        return module
+
+    def test_html_qwen_long_success_shows_correct_message(self):
+        """When qwen-long file-id succeeds, HTML should show the success message."""
+        import tempfile
+        module = self.load_checker_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            html_path = Path(tmpdir) / "llm.html"
+            module.write_llm_review_separate_html(
+                {
+                    "provider": "dashscope",
+                    "model": "qwen-long",
+                    "actual_review_model": "qwen-long",
+                    "review": {
+                        "basis": {
+                            "review_mode": "qwen_long_fileid_docx",
+                            "document_upload_status": "ok",
+                            "fallback_used": False,
+                            "fallback_reason": "",
+                        },
+                        "issues": [],
+                        "manual_review_items": [],
+                    },
+                },
+                html_path,
+            )
+            html_text = html_path.read_text(encoding="utf-8")
+            self.assertIn("qwen-long 读取规范文件 file-id 和论文 file-id 后生成", html_text)
+            self.assertNotIn("本次未能通过 API 直接提交 Word 文档", html_text)
+
+    def test_html_fallback_shows_correct_message(self):
+        """When fallback is used, HTML should show fallback message, not qwen-long success."""
+        import tempfile
+        module = self.load_checker_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            html_path = Path(tmpdir) / "llm.html"
+            module.write_llm_review_separate_html(
+                {
+                    "provider": "dashscope",
+                    "model": "qwen3.6-plus",
+                    "actual_review_model": "qwen3.6-plus",
+                    "review": {
+                        "basis": {
+                            "review_mode": "fallback_summary",
+                            "document_upload_status": "fallback_text",
+                            "fallback_used": True,
+                            "fallback_reason": "doc_model_error:APIError",
+                        },
+                        "issues": [],
+                        "manual_review_items": [],
+                    },
+                },
+                html_path,
+            )
+            html_text = html_path.read_text(encoding="utf-8")
+            self.assertIn("fallback_summary", html_text)
+            self.assertIn("本次未能通过 API 直接提交 Word 文档", html_text)
+            self.assertNotIn("qwen-long 读取规范文件 file-id 和论文 file-id 后生成", html_text)
