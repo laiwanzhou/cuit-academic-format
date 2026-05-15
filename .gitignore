@@ -16,6 +16,8 @@ resx/
 *_llm_review.html
 *_llm_fixed.docx
 *_llm_edit_plan.json
+*_llm_edit_plan_*.json
+*_llm_fixed_*.docx
 __pycache__/
 .pytest_cache/
 .idea/

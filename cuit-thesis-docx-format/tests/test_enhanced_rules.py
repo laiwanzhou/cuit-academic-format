@@ -2011,8 +2011,8 @@ def test_llm_review_result_rendered_in_html():
         }
         mod.write_html_report(report, p)
         html = p.read_text(encoding="utf-8")
-        assert "LLM 高风险格式复核" in html
-        assert "document_upload_status" in html
+        assert "LLM 高风险格式复核" not in html
+        assert "document_upload_status" not in html
 
 
 def test_llm_review_html_warns_when_no_visual_review():
@@ -2041,7 +2041,7 @@ def test_llm_review_html_warns_when_no_visual_review():
         }
         mod.write_html_report(report, p)
         html = p.read_text(encoding="utf-8")
-        assert "回退为文本/结构化摘要审查" in html
+        assert "回退为文本/结构化摘要审查" not in html
 
 
 def test_llm_review_failure_does_not_fail_run():
@@ -2377,7 +2377,7 @@ def test_main_html_links_llm_outputs():
         }
         mod.write_html_report(report, p)
         html = p.read_text(encoding="utf-8")
-        assert "D:/llm.html" in html
+        assert "D:/llm.html" not in html
 
 
 def test_llm_fixed_copied_when_no_safe_edits():
@@ -2548,6 +2548,53 @@ def test_llm_review_html_shows_document_upload_status():
         html = p.read_text(encoding="utf-8")
         assert "文档提交方式" in html
         assert "fallback_text" in html
+
+
+def test_run_outputs_json_into_json_subdir_and_no_llm_fixed_files():
+    mod = load_module()
+    _prepare_run_stub(mod)
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src = root / "sample.docx"
+        out = root / "out"
+        _make_minimal_docx(mod, src)
+        report = mod.run(src, out, "auto", "never", llm_review_config=mod.LLMReviewConfig(enabled=False))
+        assert Path(report["json_report"]).parent.name == "json"
+        assert Path(report["json_report"]).exists()
+        assert not list(out.glob("*_llm_fixed_*.docx"))
+        assert not list(out.glob("*_llm_edit_plan_*.json"))
+
+
+def test_llm_evidence_postprocess_moves_unverified_issue_to_manual():
+    mod = load_module()
+    review = {
+        "issues": [
+            {"id": "LLM-1", "evidence_found": True, "evidence_exact_quote": "1.a. 课题背景", "suggestion": "x"},
+        ],
+        "manual_review_items": [],
+        "validation_warnings": [],
+        "safe_edit_plan": [],
+    }
+    processed = mod._postprocess_llm_evidence(review, "这是另一段正文")
+    assert processed["issues"] == []
+    assert len(processed["manual_review_items"]) == 1
+    assert any("evidence" in str(x).lower() or "证据" in str(x) for x in processed["validation_warnings"])
+
+
+def test_llm_safe_edit_plan_is_advisory_only():
+    mod = load_module()
+    review = {
+        "issues": [],
+        "manual_review_items": [],
+        "validation_warnings": [],
+        "safe_edit_plan": [
+            {"id": "LLM-2", "operation": "set_run_font", "risk": "high", "evidence_exact_quote": "标题"},
+        ],
+    }
+    processed = mod._postprocess_llm_evidence(review, "标题")
+    plan = processed["safe_edit_plan"][0]
+    assert plan["can_auto_fix"] is False
+    assert plan["blocked_reason"] == "risk_not_low"
 
 
 def test_keywords_to_toc_no_blank_page():
