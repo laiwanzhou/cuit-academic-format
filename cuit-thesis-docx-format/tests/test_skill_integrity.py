@@ -766,3 +766,142 @@ class LlmReviewHtmlModeMessagesTests(unittest.TestCase):
             self.assertIn("fallback_summary", html_text)
             self.assertIn("本次未能通过 API 直接提交 Word 文档", html_text)
             self.assertNotIn("qwen-long 读取规范文件 file-id 和论文 file-id 后生成", html_text)
+
+
+
+class ManualReviewItemsFieldCompatibilityTests(unittest.TestCase):
+    def load_checker_module(self):
+        module_path = ROOT / "scripts" / "cuit_thesis_docx_format.py"
+        spec = importlib.util.spec_from_file_location("cuit_thesis_docx_format", module_path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        return module
+
+    def test_manual_review_items_new_fields_rendered(self):
+        import tempfile
+        module = self.load_checker_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            html_path = Path(tmpdir) / "llm.html"
+            module.write_llm_review_separate_html(
+                {
+                    "provider": "dashscope",
+                    "model": "qwen-long",
+                    "actual_review_model": "qwen-long",
+                    "review": {
+                        "basis": {
+                            "review_mode": "qwen_long_fileid_docx",
+                            "document_upload_status": "ok",
+                            "fallback_used": False,
+                        },
+                        "issues": [],
+                        "manual_review_items": [
+                            {
+                                "issue_type": "formatting",
+                                "category": "section_numbering",
+                                "description": "正文中出现非标准节编号",
+                                "evidence_text": "1.a. 课题背景",
+                                "source": "论文原文证据",
+                                "severity": "high",
+                                "recommendation": "改为 1.1 课题背景",
+                            }
+                        ],
+                        "validation_warnings": [],
+                    },
+                },
+                html_path,
+            )
+            html_text = html_path.read_text(encoding="utf-8")
+            self.assertIn("正文中出现非标准节编号", html_text)
+            self.assertIn("1.a. 课题背景", html_text)
+            self.assertIn("改为 1.1 课题背景", html_text)
+            self.assertIn("section_numbering", html_text)
+            self.assertIn("high", html_text)
+            self.assertIn("论文原文证据", html_text)
+
+    def test_empty_issues_shows_manual_review_hint(self):
+        import tempfile
+        module = self.load_checker_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            html_path = Path(tmpdir) / "llm.html"
+            module.write_llm_review_separate_html(
+                {
+                    "provider": "dashscope",
+                    "model": "qwen-long",
+                    "actual_review_model": "qwen-long",
+                    "review": {
+                        "basis": {
+                            "review_mode": "qwen_long_fileid_docx",
+                            "document_upload_status": "ok",
+                            "fallback_used": False,
+                        },
+                        "issues": [],
+                        "manual_review_items": [],
+                        "validation_warnings": [],
+                    },
+                },
+                html_path,
+            )
+            html_text = html_path.read_text(encoding="utf-8")
+            self.assertIn("没有通过本地证据校验", html_text)
+            self.assertIn("manual_review_items", html_text)
+
+    def test_old_fields_still_compatible(self):
+        import tempfile
+        module = self.load_checker_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            html_path = Path(tmpdir) / "llm.html"
+            module.write_llm_review_separate_html(
+                {
+                    "provider": "dashscope",
+                    "model": "qwen3.6-plus",
+                    "actual_review_model": "qwen3.6-plus",
+                    "review": {
+                        "basis": {
+                            "review_mode": "fallback_summary",
+                            "document_upload_status": "fallback_text",
+                            "fallback_used": True,
+                        },
+                        "issues": [],
+                        "manual_review_items": [
+                            {
+                                "page": "unknown",
+                                "reason": "目录页码需要人工复核",
+                                "suggestion": "在 Word 中更新目录",
+                            }
+                        ],
+                        "validation_warnings": [],
+                    },
+                },
+                html_path,
+            )
+            html_text = html_path.read_text(encoding="utf-8")
+            self.assertIn("目录页码需要人工复核", html_text)
+            self.assertIn("在 Word 中更新目录", html_text)
+
+    def test_manual_review_items_explanation_note_present(self):
+        import tempfile
+        module = self.load_checker_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            html_path = Path(tmpdir) / "llm.html"
+            module.write_llm_review_separate_html(
+                {
+                    "provider": "dashscope",
+                    "model": "qwen-long",
+                    "actual_review_model": "qwen-long",
+                    "review": {
+                        "basis": {
+                            "review_mode": "qwen_long_fileid_docx",
+                            "document_upload_status": "ok",
+                            "fallback_used": False,
+                        },
+                        "issues": [],
+                        "manual_review_items": [],
+                        "validation_warnings": [],
+                    },
+                },
+                html_path,
+            )
+            html_text = html_path.read_text(encoding="utf-8")
+            self.assertIn("证据未通过本地校验", html_text)
+            self.assertIn("仍需要人工查看", html_text)

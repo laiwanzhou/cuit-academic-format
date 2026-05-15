@@ -4795,40 +4795,54 @@ code {{ background: #f3f4f6; padding: 1px 4px; }}
     path.write_text(doc, encoding="utf-8")
 
 
+def _first_non_empty(mapping: dict, keys: list[str], default: str = "") -> str:
+    for key in keys:
+        value = mapping.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            text = ";".join(str(x) for x in value if str(x).strip())
+        elif isinstance(value, dict):
+            text = json.dumps(value, ensure_ascii=False)
+        elif isinstance(value, bool):
+            text = str(value)
+        else:
+            text = str(value)
+        if text.strip():
+            return text
+    return default
+
+
 def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) -> None:
     def _normalize_llm_issue_row(item: object, index: int) -> dict[str, str]:
         if isinstance(item, dict):
             return {
-                "id": str(item.get("id", index)),
-                "page": str(item.get("page", "unknown")),
-                "type": str(item.get("type", item.get("category", "other"))),
-                "severity": str(item.get("severity", "")),
-                "evidence": str(item.get("evidence", item.get("text", item.get("message", "")))),
-                "spec_basis": str(item.get("spec_basis", item.get("basis", ""))),
-                "suggestion": str(item.get("suggestion", item.get("advice", ""))),
+                "id": _first_non_empty(item, ["id"], str(index)),
+                "page": _first_non_empty(item, ["page"], "unknown"),
+                "type": _first_non_empty(item, ["type", "issue_type", "category"], "manual_review"),
+                "category": _first_non_empty(item, ["category"], ""),
+                "severity": _first_non_empty(item, ["severity"], ""),
+                "evidence": _first_non_empty(item, ["evidence_exact_quote", "evidence_text", "related_evidence", "evidence", "target_hint"], ""),
+                "description": _first_non_empty(item, ["description", "reason", "claim", "message", "text"], ""),
+                "spec_basis": _first_non_empty(item, ["spec_basis", "basis"], ""),
+                "suggestion": _first_non_empty(item, ["suggestion", "recommendation", "action", "advice"], ""),
+                "source": _first_non_empty(item, ["source", "verification_method"], ""),
             }
         return {
             "id": str(index),
             "page": "unknown",
             "type": "manual_review",
+            "category": "",
             "severity": "",
             "evidence": str(item),
+            "description": str(item),
             "spec_basis": "",
             "suggestion": "请人工复核该项。",
+            "source": "",
         }
 
     def _normalize_llm_manual_row(item: object, index: int) -> dict[str, str]:
-        if isinstance(item, dict):
-            return {
-                "page": str(item.get("page", "unknown")),
-                "reason": str(item.get("reason", item.get("text", item.get("message", "")))),
-                "suggestion": str(item.get("suggestion", item.get("advice", ""))),
-            }
-        return {
-            "page": "unknown",
-            "reason": str(item),
-            "suggestion": "请人工复核该项。",
-        }
+        return _normalize_llm_issue_row(item, index)
 
     review = llm_review.get("review") if isinstance(llm_review, dict) else {}
     review = review if isinstance(review, dict) else {}
@@ -4848,18 +4862,30 @@ def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) ->
         f"<td>{html.escape(it.get('page', 'unknown'))}</td>"
         f"<td>{html.escape(it.get('type', 'other'))}</td>"
         f"<td>{html.escape(it.get('severity', ''))}</td>"
-        f"<td>{html.escape(it.get('evidence', ''))}</td>"
+        f"<td class=\"prewrap\">{html.escape(it.get('evidence', ''))}</td>"
         f"<td>{html.escape(it.get('spec_basis', ''))}</td>"
-        f"<td>{html.escape(it.get('suggestion', ''))}</td>"
+        f"<td class=\"prewrap\">{html.escape(it.get('suggestion', ''))}</td>"
         "</tr>"
         for it in issues_sorted
     )
+    if not issues_sorted:
+        issue_rows = (
+            "<tr><td colspan=\"7\"><em>"
+            "没有通过本地证据校验的明确问题；"
+            "请查看 manual_review_items 中的人工复核建议。"
+            "</em></td></tr>"
+        )
     manual_normalized = [_normalize_llm_manual_row(item, idx) for idx, item in enumerate(manual_items, start=1)]
     manual_rows = "".join(
         "<tr>"
+        f"<td>{html.escape(it.get('id', ''))}</td>"
         f"<td>{html.escape(it.get('page', 'unknown'))}</td>"
-        f"<td>{html.escape(it.get('reason', ''))}</td>"
-        f"<td>{html.escape(it.get('suggestion', ''))}</td>"
+        f"<td>{html.escape(it.get('type', ''))}</td>"
+        f"<td>{html.escape(it.get('severity', ''))}</td>"
+        f"<td class=\"prewrap\">{html.escape(it.get('evidence', ''))}</td>"
+        f"<td class=\"prewrap\">{html.escape(it.get('description', ''))}</td>"
+        f"<td class=\"prewrap\">{html.escape(it.get('suggestion', ''))}</td>"
+        f"<td>{html.escape(it.get('source', ''))}</td>"
         "</tr>"
         for it in manual_normalized
     )
@@ -4921,6 +4947,7 @@ body {{ font-family: "Microsoft YaHei", sans-serif; margin: 24px; line-height: 1
 table {{ border-collapse: collapse; width: 100%; }}
 th, td {{ border: 1px solid #d1d5db; padding: 6px; vertical-align: top; text-align: left; }}
 .warn {{ color: #b91c1c; font-weight: 700; }}
+td.prewrap {{ white-space: pre-wrap; word-break: break-word; }}
 </style>
 </head>
 <body>
@@ -4954,7 +4981,8 @@ th, td {{ border: 1px solid #d1d5db; padding: 6px; vertical-align: top; text-ali
 <h2>问题列表</h2>
 <table><thead><tr><th>ID</th><th>页码</th><th>类型</th><th>严重度</th><th>证据</th><th>规范依据</th><th>建议</th></tr></thead><tbody>{issue_rows}</tbody></table>
 <h2>manual_review_items</h2>
-<table><thead><tr><th>页码</th><th>原因</th><th>建议</th></tr></thead><tbody>{manual_rows}</tbody></table>
+<p><em>说明：证据未通过本地校验或涉及 Word 域/版式风险的项目会进入 manual_review_items；这些项目不会自动修改，但仍需要人工查看。</em></p>
+<table><thead><tr><th>ID</th><th>页码</th><th>类型</th><th>严重度</th><th>证据</th><th>原因/描述</th><th>建议</th><th>来源</th></tr></thead><tbody>{manual_rows}</tbody></table>
 <h2>uncertain_items</h2>
 <table><thead><tr><th>#</th><th>内容</th></tr></thead><tbody>{uncertain_rows}</tbody></table>
 <h2>safe_edit_plan（仅建议，不自动执行）</h2>
