@@ -4824,40 +4824,88 @@ code {{ background: #f3f4f6; padding: 1px 4px; }}
 
 
 def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) -> None:
+    def _normalize_llm_issue_row(item: object, index: int) -> dict[str, str]:
+        if isinstance(item, dict):
+            return {
+                "id": str(item.get("id", index)),
+                "page": str(item.get("page", "unknown")),
+                "type": str(item.get("type", item.get("category", "other"))),
+                "severity": str(item.get("severity", "")),
+                "evidence": str(item.get("evidence", item.get("text", item.get("message", "")))),
+                "spec_basis": str(item.get("spec_basis", item.get("basis", ""))),
+                "suggestion": str(item.get("suggestion", item.get("advice", ""))),
+            }
+        return {
+            "id": str(index),
+            "page": "unknown",
+            "type": "manual_review",
+            "severity": "",
+            "evidence": str(item),
+            "spec_basis": "",
+            "suggestion": "请人工复核该项。",
+        }
+
+    def _normalize_llm_manual_row(item: object, index: int) -> dict[str, str]:
+        if isinstance(item, dict):
+            return {
+                "page": str(item.get("page", "unknown")),
+                "reason": str(item.get("reason", item.get("text", item.get("message", "")))),
+                "suggestion": str(item.get("suggestion", item.get("advice", ""))),
+            }
+        return {
+            "page": "unknown",
+            "reason": str(item),
+            "suggestion": "请人工复核该项。",
+        }
+
     review = llm_review.get("review") if isinstance(llm_review, dict) else {}
     review = review if isinstance(review, dict) else {}
     basis = review.get("basis") if isinstance(review.get("basis"), dict) else {}
     issues = review.get("issues") if isinstance(review.get("issues"), list) else []
     manual_items = review.get("manual_review_items") if isinstance(review.get("manual_review_items"), list) else []
-    issues_sorted = sorted([x for x in issues if isinstance(x, dict)], key=lambda x: str(x.get("page", "unknown")))
+    issues_normalized = [_normalize_llm_issue_row(item, idx) for idx, item in enumerate(issues, start=1)]
+    issues_sorted = sorted(issues_normalized, key=lambda x: x.get("page", "unknown"))
     issue_rows = "".join(
         "<tr>"
-        f"<td>{html.escape(str(it.get('id', '')))}</td>"
-        f"<td>{html.escape(str(it.get('page', 'unknown')))}</td>"
-        f"<td>{html.escape(str(it.get('type', 'other')))}</td>"
-        f"<td>{html.escape(str(it.get('severity', '')))}</td>"
-        f"<td>{html.escape(str(it.get('evidence', '')))}</td>"
-        f"<td>{html.escape(str(it.get('spec_basis', '')))}</td>"
-        f"<td>{html.escape(str(it.get('suggestion', '')))}</td>"
+        f"<td>{html.escape(it.get('id', ''))}</td>"
+        f"<td>{html.escape(it.get('page', 'unknown'))}</td>"
+        f"<td>{html.escape(it.get('type', 'other'))}</td>"
+        f"<td>{html.escape(it.get('severity', ''))}</td>"
+        f"<td>{html.escape(it.get('evidence', ''))}</td>"
+        f"<td>{html.escape(it.get('spec_basis', ''))}</td>"
+        f"<td>{html.escape(it.get('suggestion', ''))}</td>"
         "</tr>"
         for it in issues_sorted
     )
+    manual_normalized = [_normalize_llm_manual_row(item, idx) for idx, item in enumerate(manual_items, start=1)]
     manual_rows = "".join(
         "<tr>"
-        f"<td>{html.escape(str(it.get('page', 'unknown')))}</td>"
-        f"<td>{html.escape(str(it.get('reason', '')))}</td>"
-        f"<td>{html.escape(str(it.get('suggestion', '')))}</td>"
+        f"<td>{html.escape(it.get('page', 'unknown'))}</td>"
+        f"<td>{html.escape(it.get('reason', ''))}</td>"
+        f"<td>{html.escape(it.get('suggestion', ''))}</td>"
         "</tr>"
-        for it in manual_items
-        if isinstance(it, dict)
+        for it in manual_normalized
     )
     status = str(basis.get("document_upload_status", llm_review.get("document_upload_status", "failed")))
     fallback_used = bool(basis.get("fallback_used", llm_review.get("fallback_used", False)))
     fallback_reason = str(basis.get("fallback_reason", llm_review.get("fallback_reason", "")))
+    doc_model_attempted = str(
+        basis.get("doc_model_attempted", llm_review.get("doc_model_attempted", llm_review.get("model", "")))
+    )
+    fallback_model = str(basis.get("fallback_model", llm_review.get("fallback_model", "")))
+    actual_review_model = str(
+        llm_review.get("actual_review_model", fallback_model if fallback_used and fallback_model else llm_review.get("model", ""))
+    )
     apply_result = llm_review.get("apply_result") if isinstance(llm_review.get("apply_result"), dict) else {}
     fallback_note = ""
     if status != "ok":
         fallback_note = "<p><strong>本次未能通过 API 直接提交 Word 文档，已回退为文本/结构化摘要审查。</strong></p>"
+    fallback_llm_note = ""
+    if fallback_used:
+        fallback_llm_note = (
+            "<p><strong>说明：</strong>qwen-long file-id 双文档审查失败，系统已回退为文本/结构化摘要审查；"
+            "以下问题列表仍由 LLM 根据抽取出的规范文本、fixed 文档结构和确定性检查摘要生成。</p>"
+        )
     doc = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -4872,7 +4920,8 @@ th, td {{ border: 1px solid #d1d5db; padding: 6px; vertical-align: top; text-ali
 <body>
 <h1>LLM 格式审查与修改建议报告</h1>
 <p>该报告由千问根据格式指导书和 fixed 文档生成，仅供人工复核；llm_fixed 只应用低风险修改。</p>
-<p><strong>模型：</strong>{html.escape(str(llm_review.get("provider", "")))} / {html.escape(str(llm_review.get("model", "")))}</p>
+<p><strong>主链路尝试模型：</strong>{html.escape(str(llm_review.get("provider", "")))} / {html.escape(doc_model_attempted)}</p>
+<p><strong>实际生成审查内容模型：</strong>{html.escape(str(llm_review.get("provider", "")))} / {html.escape(actual_review_model)}</p>
 <p><strong>是否使用格式指导书 docx：</strong>{html.escape(str(basis.get("uses_spec_docx", llm_review.get("uses_spec_docx", False))))}</p>
 <p><strong>是否使用 fixed docx：</strong>{html.escape(str(basis.get("uses_fixed_docx", llm_review.get("uses_fixed_docx", False))))}</p>
 <p><strong>文档提交方式：</strong>{html.escape(status if status else "failed")}</p>
@@ -4883,6 +4932,7 @@ th, td {{ border: 1px solid #d1d5db; padding: 6px; vertical-align: top; text-ali
 <p><strong>llm_fixed 路径：</strong>{html.escape(str(llm_review.get("llm_fixed_docx", "")))}</p>
 <p><strong>safe_edit_plan 应用统计：</strong>applied={html.escape(str(apply_result.get("applied_count", 0)))}, skipped={html.escape(str(apply_result.get("skipped_count", 0)))}</p>
 {fallback_note}
+{fallback_llm_note}
 <h2>问题列表</h2>
 <table><thead><tr><th>ID</th><th>页码</th><th>类型</th><th>严重度</th><th>证据</th><th>规范依据</th><th>建议</th></tr></thead><tbody>{issue_rows}</tbody></table>
 <h2>manual_review_items</h2>
@@ -5381,6 +5431,8 @@ def run_qwen_docx_review(*, config: LLMReviewConfig, api_key: str, candidates: d
     upload_ok = bool(probe.get("supported"))
     fallback_used = not upload_ok
     fallback_reason = "" if upload_ok else str(probe.get("reason", "upload_not_supported"))
+    doc_model_error_type = ""
+    doc_model_error_message = ""
     prompt = _build_llm_user_prompt(candidates, fallback_used=fallback_used)
 
     raw_text = ""
@@ -5404,6 +5456,8 @@ def run_qwen_docx_review(*, config: LLMReviewConfig, api_key: str, candidates: d
             upload_ok = False
             fallback_used = True
             fallback_reason = f"doc_model_error:{exc.__class__.__name__}"
+            doc_model_error_type = exc.__class__.__name__
+            doc_model_error_message = str(exc)[:1000]
     if not raw_text:
         payload = call_openai_compatible_chat(
             base_url=config.base_url,
@@ -5441,6 +5495,10 @@ def run_qwen_docx_review(*, config: LLMReviewConfig, api_key: str, candidates: d
     basis["fallback_reason"] = fallback_reason
     basis["doc_model_attempted"] = config.doc_model
     basis["fallback_model"] = config.review_model if fallback_used else ""
+    basis["doc_model_error_type"] = doc_model_error_type
+    basis["doc_model_error_message"] = doc_model_error_message
+    basis["doc_model_fileid_attempted"] = bool(upload_ok or fallback_reason.startswith("doc_model_error:"))
+    basis["doc_model_fixed_docx_name"] = fixed_docx.name if fixed_docx else ""
     basis.setdefault("spec_name", spec_docx.name if spec_docx else "")
     basis.setdefault("fixed_docx_name", fixed_docx.name if fixed_docx else "")
 
@@ -5453,6 +5511,9 @@ def run_qwen_docx_review(*, config: LLMReviewConfig, api_key: str, candidates: d
     parsed.setdefault("manual_review_items", [])
     parsed.setdefault("safe_edit_plan", [])
     parsed.setdefault("notes", [])
+    actual_review_model = config.review_model if fallback_used else config.doc_model
+    parsed["actual_review_model"] = actual_review_model
+    basis["actual_review_model"] = actual_review_model
     return {"status": "ok", "review": parsed, "probe": probe}
 
 
@@ -5507,6 +5568,10 @@ def run_llm_review(config: LLMReviewConfig, candidates: dict[str, object], doten
             "uses_fixed_docx": review.get("basis", {}).get("uses_fixed_docx", False),
             "doc_model_attempted": review.get("basis", {}).get("doc_model_attempted", config.doc_model),
             "fallback_model": review.get("basis", {}).get("fallback_model", ""),
+            "actual_review_model": review.get(
+                "actual_review_model",
+                review.get("basis", {}).get("actual_review_model", config.review_model if review.get("basis", {}).get("fallback_used", True) else config.doc_model),
+            ),
             "image_upload_mode": "docx_upload" if review.get("basis", {}).get("document_upload_status") == "ok" else "fallback_text_extraction",
         }
         if config.output_path is not None:

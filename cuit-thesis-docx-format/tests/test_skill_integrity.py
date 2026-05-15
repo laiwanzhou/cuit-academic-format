@@ -2,6 +2,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -518,3 +519,68 @@ class DashScopeFileIdMessageTests(unittest.TestCase):
         script = ROOT / "examples" / "dashscope" / "summarize_uploaded_file.py"
         text = script.read_text(encoding="utf-8")
         self.assertNotIn("目标文件：fileid://", text)
+
+
+class LLMReviewHtmlFallbackRenderTests(unittest.TestCase):
+    def load_checker_module(self):
+        module_path = ROOT / "scripts" / "cuit_thesis_docx_format.py"
+        spec = importlib.util.spec_from_file_location("cuit_thesis_docx_format", module_path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        return module
+
+    def test_llm_review_html_renders_string_issue_and_manual_items(self):
+        module = self.load_checker_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            html_path = Path(tmpdir) / "llm_review.html"
+            module.write_llm_review_separate_html(
+                {
+                    "provider": "dashscope",
+                    "model": "qwen-long",
+                    "actual_review_model": "qwen3.6-plus",
+                    "review": {
+                        "basis": {
+                            "document_upload_status": "fallback_text",
+                            "fallback_used": True,
+                            "fallback_reason": "doc_model_error:APIError",
+                        },
+                        "issues": ["页眉缺失", "参考文献格式风险"],
+                        "manual_review_items": ["人工核对目录页码"],
+                    },
+                },
+                html_path,
+            )
+            html_text = html_path.read_text(encoding="utf-8")
+            self.assertIn("页眉缺失", html_text)
+            self.assertIn("参考文献格式风险", html_text)
+            self.assertIn("人工核对目录页码", html_text)
+
+    def test_llm_review_html_shows_attempted_and_actual_model(self):
+        module = self.load_checker_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            html_path = Path(tmpdir) / "llm_review.html"
+            module.write_llm_review_separate_html(
+                {
+                    "provider": "dashscope",
+                    "model": "qwen-long",
+                    "actual_review_model": "qwen3.6-plus",
+                    "review": {
+                        "basis": {
+                            "document_upload_status": "fallback_text",
+                            "fallback_used": True,
+                            "fallback_reason": "doc_model_error:APIError",
+                            "doc_model_attempted": "qwen-long",
+                            "fallback_model": "qwen3.6-plus",
+                        },
+                        "issues": [],
+                        "manual_review_items": [],
+                    },
+                },
+                html_path,
+            )
+            html_text = html_path.read_text(encoding="utf-8")
+            self.assertIn("主链路尝试模型", html_text)
+            self.assertIn("实际生成审查内容模型", html_text)
+            self.assertIn("qwen3.6-plus", html_text)
+            self.assertIn("fallback_text", html_text)
