@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -20,7 +20,7 @@ def main() -> int:
     client = OpenAI(api_key=api_key, base_url=args.base_url)
     messages = [
         {"role": "system", "content": "你是文档总结助手。"},
-        {"role": "system", "content": f"目标文件：fileid://{args.file_id}"},
+        {"role": "system", "content": f"fileid://{args.file_id}"},
         {"role": "user", "content": args.question},
     ]
     resp = client.chat.completions.create(model=args.model, messages=messages, stream=False)

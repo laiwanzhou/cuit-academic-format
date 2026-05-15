@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 from __future__ import annotations
 
 import os
@@ -32,7 +32,7 @@ def upload_file_for_extract(client: OpenAI, path: Path) -> str:
     return str(file_id)
 
 
-def wait_file_processed(client: OpenAI, file_id: str, timeout_seconds: int = 120, interval_seconds: int = 2):
+def wait_file_processed(client: OpenAI, file_id: str, timeout_seconds: int = 600, interval_seconds: int = 3):
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         file_obj = client.files.retrieve(file_id)
@@ -45,7 +45,12 @@ def wait_file_processed(client: OpenAI, file_id: str, timeout_seconds: int = 120
     raise TimeoutError(f"Timed out waiting for file processed: file_id={file_id}")
 
 
-def resolve_spec_file_id(client: OpenAI, spec_file_id: str | None, spec_docx_path: Path | None) -> str:
+def resolve_spec_file_id(
+    client: OpenAI,
+    spec_file_id: str | None,
+    spec_docx_path: Path | None,
+    timeout_seconds: int = 600,
+) -> str:
     if spec_file_id:
         return spec_file_id
     if spec_docx_path is None:
@@ -53,15 +58,15 @@ def resolve_spec_file_id(client: OpenAI, spec_file_id: str | None, spec_docx_pat
     if not spec_docx_path.exists():
         raise FileNotFoundError(spec_docx_path)
     uploaded_id = upload_file_for_extract(client, spec_docx_path)
-    wait_file_processed(client, uploaded_id)
+    wait_file_processed(client, uploaded_id, timeout_seconds=timeout_seconds)
     return uploaded_id
 
 
-def upload_target_docx(client: OpenAI, target_docx_path: Path) -> str:
+def upload_target_docx(client: OpenAI, target_docx_path: Path, timeout_seconds: int = 600) -> str:
     if not target_docx_path.exists():
         raise FileNotFoundError(target_docx_path)
     uploaded_id = upload_file_for_extract(client, target_docx_path)
-    wait_file_processed(client, uploaded_id)
+    wait_file_processed(client, uploaded_id, timeout_seconds=timeout_seconds)
     return uploaded_id
 
 
@@ -69,10 +74,14 @@ def build_qwen_long_docx_review_messages(spec_file_id: str, target_file_id: str,
     return [
         {
             "role": "system",
-            "content": "你是成都信息工程大学本科论文格式审查助手。请根据规范文件审查论文并给出结构化建议。",
+            "content": (
+                "你是成都信息工程大学本科论文格式审查助手。"
+                "接下来会提供两份文档：第一份是学校论文格式规范，第二份是待检查论文。"
+                "请严格依据第一份规范检查第二份论文。"
+            ),
         },
-        {"role": "system", "content": f"这是学校论文格式规范文件：fileid://{spec_file_id}"},
-        {"role": "system", "content": f"这是需要检查的学生论文文件：fileid://{target_file_id}"},
+        {"role": "system", "content": f"fileid://{spec_file_id}"},
+        {"role": "system", "content": f"fileid://{target_file_id}"},
         {"role": "user", "content": user_prompt},
     ]
 
@@ -84,6 +93,7 @@ def run_qwen_long_docx_review(
     target_file_id: str,
     model: str = "qwen-long",
     user_prompt: str | None = None,
+    timeout_seconds: int = 600,
 ) -> str:
     prompt = user_prompt or (
         "请输出：\n"
@@ -95,13 +105,23 @@ def run_qwen_long_docx_review(
         "六、必须人工复核项 manual_review_items"
     )
     messages = build_qwen_long_docx_review_messages(spec_file_id, target_file_id, prompt)
-    response = client.chat.completions.create(model=model, messages=messages, stream=False)
-    choices = getattr(response, "choices", None) or []
-    if not choices:
-        return ""
-    message = getattr(choices[0], "message", None)
-    content = getattr(message, "content", "") if message else ""
-    return str(content or "")
+    stream = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        stream=True,
+        stream_options={"include_usage": True},
+        timeout=timeout_seconds,
+    )
+    parts: list[str] = []
+    for chunk in stream:
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            continue
+        delta = getattr(choices[0], "delta", None)
+        content = getattr(delta, "content", "") if delta else ""
+        if content:
+            parts.append(str(content))
+    return "".join(parts)
 
 
 def delete_uploaded_file(client: OpenAI, file_id: str):

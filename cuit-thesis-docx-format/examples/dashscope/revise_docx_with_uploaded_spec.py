@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -23,20 +23,22 @@ def main() -> int:
     parser.add_argument("--spec-docx")
     parser.add_argument("--target-docx", required=True)
     parser.add_argument("--model", default="qwen-long")
+    parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--output")
     parser.add_argument("--base-url", default="https://dashscope.aliyuncs.com/compatible-mode/v1")
     args = parser.parse_args()
 
     client = get_default_client_from_env(base_url=args.base_url)
     spec_path = Path(args.spec_docx) if args.spec_docx else None
-    spec_file_id = resolve_spec_file_id(client, args.spec_file_id, spec_path)
-    target_file_id = upload_target_docx(client, Path(args.target_docx))
+    spec_file_id = resolve_spec_file_id(client, args.spec_file_id, spec_path, timeout_seconds=args.timeout)
+    target_file_id = upload_target_docx(client, Path(args.target_docx), timeout_seconds=args.timeout)
     text = run_qwen_long_docx_review(
         client=client,
         spec_file_id=spec_file_id,
         target_file_id=target_file_id,
         model=args.model,
-        user_prompt="请根据规范文件检查论文并给出修改建议与 safe_edit_plan、manual_review_items。",
+        timeout_seconds=args.timeout,
+        user_prompt="请根据规范文件检查论文并给出修改建议、safe_edit_plan 和 manual_review_items。",
     )
     if args.output:
         Path(args.output).write_text(text, encoding="utf-8", newline="\n")

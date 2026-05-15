@@ -162,7 +162,7 @@ class LLMReviewConfig:
     api_key_env: str = "DASHSCOPE_API_KEY"
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     max_pages: int = 8
-    timeout: int = 60
+    timeout: int = 600
     mode: str = "auto"
     spec_docx_path: Path | None = None
     all_pages: bool = False
@@ -251,7 +251,7 @@ def resolve_llm_review_config(args: argparse.Namespace, dotenv: dict[str, str]) 
         api_key_env=args.llm_api_key_env or "DASHSCOPE_API_KEY",
         base_url=get_config_value("DASHSCOPE_BASE_URL", args.llm_base_url, env, dotenv, "https://dashscope.aliyuncs.com/compatible-mode/v1"),
         max_pages=_safe_positive_int(get_config_value("LLM_REVIEW_MAX_PAGES", str(args.llm_review_max_pages), env, dotenv, "8"), 8),
-        timeout=_safe_positive_int(get_config_value("LLM_REVIEW_TIMEOUT", str(args.llm_review_timeout), env, dotenv, "60"), 60),
+        timeout=_safe_positive_int(get_config_value("LLM_REVIEW_TIMEOUT", str(args.llm_review_timeout), env, dotenv, "600"), 600),
         mode=args.llm_review_mode,
         spec_docx_path=spec_path,
         all_pages=bool(args.llm_review_all_pages),
@@ -5360,8 +5360,8 @@ def probe_dashscope_document_upload_support(config: LLMReviewConfig, api_key: st
         if not spec_docx.exists() or not fixed_docx.exists():
             return {"supported": False, "method": "fallback_text_extraction", "reason": "missing_docx_file"}
         client = get_dashscope_client(api_key=api_key, base_url=config.base_url)
-        spec_file_id = resolve_spec_file_id(client, config.spec_file_id, spec_docx)
-        fixed_file_id = upload_target_docx(client, fixed_docx)
+        spec_file_id = resolve_spec_file_id(client, config.spec_file_id, spec_docx, timeout_seconds=config.timeout)
+        fixed_file_id = upload_target_docx(client, fixed_docx, timeout_seconds=config.timeout)
         if spec_file_id and fixed_file_id:
             return {
                 "supported": True,
@@ -5393,6 +5393,7 @@ def run_qwen_docx_review(*, config: LLMReviewConfig, api_key: str, candidates: d
                 target_file_id=str(file_ids.get("fixed", "")),
                 model=config.doc_model,
                 user_prompt=prompt,
+                timeout_seconds=config.timeout,
             )
             if config.delete_uploaded_target_after_review and str(file_ids.get("fixed", "")):
                 try:
@@ -5438,6 +5439,8 @@ def run_qwen_docx_review(*, config: LLMReviewConfig, api_key: str, candidates: d
     basis["document_upload_status"] = "ok" if upload_ok else "fallback_text"
     basis["fallback_used"] = fallback_used
     basis["fallback_reason"] = fallback_reason
+    basis["doc_model_attempted"] = config.doc_model
+    basis["fallback_model"] = config.review_model if fallback_used else ""
     basis.setdefault("spec_name", spec_docx.name if spec_docx else "")
     basis.setdefault("fixed_docx_name", fixed_docx.name if fixed_docx else "")
 
@@ -5479,6 +5482,14 @@ def run_llm_review(config: LLMReviewConfig, candidates: dict[str, object], doten
                 "base_url": config.base_url,
                 "status": "failed",
                 "reason": f"api_error:{result.get('reason', 'unknown')}",
+                "doc_model_attempted": config.doc_model,
+                "fallback_model": config.review_model,
+                "fallback_used": False,
+                "fallback_reason": str(result.get("reason", "unknown")),
+                "document_upload_status": "failed",
+                "uses_spec_docx": bool(candidates.get("spec_text")) or bool(candidates.get("spec_docx_path")),
+                "uses_fixed_docx": bool(candidates.get("summary", {}).get("fixed_docx")),
+                "raw_error": str(result.get("reason", "unknown")),
             }
         review = result.get("review", {})
         response = {
@@ -5494,6 +5505,8 @@ def run_llm_review(config: LLMReviewConfig, candidates: dict[str, object], doten
             "fallback_reason": review.get("basis", {}).get("fallback_reason", ""),
             "uses_spec_docx": review.get("basis", {}).get("uses_spec_docx", False),
             "uses_fixed_docx": review.get("basis", {}).get("uses_fixed_docx", False),
+            "doc_model_attempted": review.get("basis", {}).get("doc_model_attempted", config.doc_model),
+            "fallback_model": review.get("basis", {}).get("fallback_model", ""),
             "image_upload_mode": "docx_upload" if review.get("basis", {}).get("document_upload_status") == "ok" else "fallback_text_extraction",
         }
         if config.output_path is not None:
@@ -5509,6 +5522,14 @@ def run_llm_review(config: LLMReviewConfig, candidates: dict[str, object], doten
             "base_url": config.base_url,
             "status": "failed",
             "reason": f"api_error:{exc.__class__.__name__}",
+            "doc_model_attempted": config.doc_model,
+            "fallback_model": config.review_model,
+            "fallback_used": False,
+            "fallback_reason": f"api_error:{exc.__class__.__name__}",
+            "document_upload_status": "failed",
+            "uses_spec_docx": bool(candidates.get("spec_text")) or bool(candidates.get("spec_docx_path")),
+            "uses_fixed_docx": bool(candidates.get("summary", {}).get("fixed_docx")),
+            "raw_error": f"{exc.__class__.__name__}: {exc}",
         }
 
 def run(
@@ -5747,7 +5768,7 @@ def main() -> int:
     parser.add_argument("--llm-review-image-transport", choices=["data_uri"], default="data_uri", help="Image transport for LLM vision.")
     parser.add_argument("--llm-review-no-separate-html", action="store_true", help="Disable separate LLM review HTML output.")
     parser.add_argument("--llm-review-output", default=None, help="Optional path to save raw LLM review JSON.")
-    parser.add_argument("--llm-review-timeout", type=int, default=60, help="LLM request timeout seconds.")
+    parser.add_argument("--llm-review-timeout", type=int, default=600, help="LLM request timeout seconds.")
     args = parser.parse_args()
     dotenv_values = load_dotenv_file(DEFAULT_DOTENV_PATH)
     llm_config = resolve_llm_review_config(args, dotenv_values)

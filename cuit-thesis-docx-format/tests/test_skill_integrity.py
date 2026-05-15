@@ -499,3 +499,22 @@ class EnvSafetyTests(unittest.TestCase):
         self.assertTrue(root_gitignore.exists())
         content = root_gitignore.read_text(encoding="utf-8")
         self.assertIn("成都信息工程大学学士学位论文规范.docx", content)
+
+class DashScopeFileIdMessageTests(unittest.TestCase):
+    def test_build_qwen_long_docx_review_messages_uses_plain_fileid_messages(self):
+        module_path = ROOT / "scripts" / "dashscope_doc_review.py"
+        spec = importlib.util.spec_from_file_location("dashscope_doc_review", module_path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+
+        messages = module.build_qwen_long_docx_review_messages("file-fe-spec", "file-fe-target", "check")
+        self.assertEqual(messages[1]["content"], "fileid://file-fe-spec")
+        self.assertEqual(messages[2]["content"], "fileid://file-fe-target")
+        self.assertNotIn("这是", messages[1]["content"])
+        self.assertNotIn("这是", messages[2]["content"])
+
+    def test_summarize_uploaded_file_does_not_prefix_fileid_label(self):
+        script = ROOT / "examples" / "dashscope" / "summarize_uploaded_file.py"
+        text = script.read_text(encoding="utf-8")
+        self.assertNotIn("目标文件：fileid://", text)
