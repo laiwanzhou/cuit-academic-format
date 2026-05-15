@@ -490,7 +490,8 @@ class EnvSafetyTests(unittest.TestCase):
         self.assertTrue(env_example.exists())
         content = env_example.read_text(encoding="utf-8")
         self.assertIn("your_dashscope_api_key_here", content)
-        self.assertIn("your_deepseek_api_key_here", content)
+        self.assertIn("DASHSCOPE_DOC_MODEL=qwen-long", content)
+        self.assertIn("DASHSCOPE_REVIEW_MODEL=qwen3.6-plus", content)
         self.assertNotIn("sk-", content)
 
     def test_local_spec_docx_is_gitignored_or_allowed(self):

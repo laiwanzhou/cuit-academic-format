@@ -24,6 +24,18 @@ from tempfile import TemporaryDirectory
 from typing import Iterable
 from xml.etree import ElementTree as ET
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from dashscope_doc_review import (  # type: ignore
+    delete_uploaded_file as dashscope_delete_uploaded_file,
+    get_dashscope_client,
+    resolve_spec_file_id,
+    run_qwen_long_docx_review,
+    upload_target_docx,
+)
+
 try:
     from docx import Document
     from docx.enum.section import WD_SECTION_START
@@ -144,6 +156,8 @@ class Issue:
 class LLMReviewConfig:
     enabled: bool = False
     provider: str = "dashscope"
+    review_model: str = "qwen3.6-plus"
+    doc_model: str = "qwen-long"
     model: str = "qwen3.6-plus"
     api_key_env: str = "DASHSCOPE_API_KEY"
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -156,6 +170,9 @@ class LLMReviewConfig:
     separate_html: bool = True
     image_upload: bool = True
     image_transport: str = "data_uri"
+    spec_file_id: str | None = None
+    upload_target_docx: bool = True
+    delete_uploaded_target_after_review: bool = False
     output_path: Path | None = None
 
 
@@ -210,10 +227,27 @@ def resolve_llm_review_config(args: argparse.Namespace, dotenv: dict[str, str]) 
     env = os.environ
     default_spec = SKILL_DIR.parent / "成都信息工程大学学士学位论文规范.docx"
     spec_path = Path(args.llm_review_spec_docx) if args.llm_review_spec_docx else (default_spec if default_spec.exists() else None)
+    review_model = (
+        getattr(args, "llm_review_model", None)
+        or getattr(args, "llm_model", None)
+        or env.get("DASHSCOPE_REVIEW_MODEL")
+        or dotenv.get("DASHSCOPE_REVIEW_MODEL")
+        or env.get("DASHSCOPE_MODEL")
+        or dotenv.get("DASHSCOPE_MODEL")
+        or "qwen3.6-plus"
+    )
+    doc_model = (
+        getattr(args, "llm_doc_model", None)
+        or env.get("DASHSCOPE_DOC_MODEL")
+        or dotenv.get("DASHSCOPE_DOC_MODEL")
+        or "qwen-long"
+    )
     return LLMReviewConfig(
         enabled=bool(args.llm_review),
         provider=get_config_value("LLM_PROVIDER", args.llm_provider, env, dotenv, "dashscope"),
-        model=get_config_value("DASHSCOPE_MODEL", args.llm_model, env, dotenv, "qwen3.6-plus"),
+        review_model=review_model,
+        doc_model=doc_model,
+        model=review_model,
         api_key_env=args.llm_api_key_env or "DASHSCOPE_API_KEY",
         base_url=get_config_value("DASHSCOPE_BASE_URL", args.llm_base_url, env, dotenv, "https://dashscope.aliyuncs.com/compatible-mode/v1"),
         max_pages=_safe_positive_int(get_config_value("LLM_REVIEW_MAX_PAGES", str(args.llm_review_max_pages), env, dotenv, "8"), 8),
@@ -225,6 +259,9 @@ def resolve_llm_review_config(args: argparse.Namespace, dotenv: dict[str, str]) 
         separate_html=not bool(args.llm_review_no_separate_html),
         image_upload=bool(args.llm_review_image_upload),
         image_transport=getattr(args, "llm_review_image_transport", "data_uri"),
+        spec_file_id=getattr(args, "llm_review_spec_file_id", None),
+        upload_target_docx=bool(getattr(args, "llm_review_upload_target_docx", True)),
+        delete_uploaded_target_after_review=bool(getattr(args, "llm_review_delete_uploaded_target_after_review", False)),
         output_path=Path(args.llm_review_output) if args.llm_review_output else None,
     )
 
@@ -5322,10 +5359,9 @@ def probe_dashscope_document_upload_support(config: LLMReviewConfig, api_key: st
     try:
         if not spec_docx.exists() or not fixed_docx.exists():
             return {"supported": False, "method": "fallback_text_extraction", "reason": "missing_docx_file"}
-        spec_upload = upload_llm_image_file(spec_docx, config, api_key)
-        fixed_upload = upload_llm_image_file(fixed_docx, config, api_key)
-        spec_file_id = spec_upload.get("id") if isinstance(spec_upload, dict) else None
-        fixed_file_id = fixed_upload.get("id") if isinstance(fixed_upload, dict) else None
+        client = get_dashscope_client(api_key=api_key, base_url=config.base_url)
+        spec_file_id = resolve_spec_file_id(client, config.spec_file_id, spec_docx)
+        fixed_file_id = upload_target_docx(client, fixed_docx)
         if spec_file_id and fixed_file_id:
             return {
                 "supported": True,
@@ -5340,47 +5376,63 @@ def probe_dashscope_document_upload_support(config: LLMReviewConfig, api_key: st
 def run_qwen_docx_review(*, config: LLMReviewConfig, api_key: str, candidates: dict[str, object]) -> dict[str, object]:
     spec_docx = Path(str(candidates.get("spec_docx_path") or ""))
     fixed_docx = Path(str(candidates.get("summary", {}).get("fixed_docx", "")))
+    client = get_dashscope_client(api_key=api_key, base_url=config.base_url)
     probe = probe_dashscope_document_upload_support(config, api_key, spec_docx, fixed_docx)
     upload_ok = bool(probe.get("supported"))
     fallback_used = not upload_ok
     fallback_reason = "" if upload_ok else str(probe.get("reason", "upload_not_supported"))
     prompt = _build_llm_user_prompt(candidates, fallback_used=fallback_used)
 
+    raw_text = ""
     if upload_ok:
         file_ids = probe.get("file_ids", {})
-        messages = [
-            {"role": "system", "content": LLM_REVIEW_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "file", "file": {"file_id": str(file_ids.get("spec", ""))}},
-                    {"type": "file", "file": {"file_id": str(file_ids.get("fixed", ""))}},
-                ],
-            },
-        ]
-    else:
-        messages = [
-            {"role": "system", "content": LLM_REVIEW_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ]
-
-    payload = call_openai_compatible_chat(
-        base_url=config.base_url,
-        api_key=api_key,
-        model=config.model,
-        messages=messages,
-        timeout=config.timeout,
-    )
-    parsed = parse_llm_review_response(_extract_chat_content(payload))
+        try:
+            raw_text = run_qwen_long_docx_review(
+                client=client,
+                spec_file_id=str(file_ids.get("spec", "")),
+                target_file_id=str(file_ids.get("fixed", "")),
+                model=config.doc_model,
+                user_prompt=prompt,
+            )
+            if config.delete_uploaded_target_after_review and str(file_ids.get("fixed", "")):
+                try:
+                    dashscope_delete_uploaded_file(client, str(file_ids.get("fixed", "")))
+                except Exception:
+                    pass
+        except Exception as exc:
+            upload_ok = False
+            fallback_used = True
+            fallback_reason = f"doc_model_error:{exc.__class__.__name__}"
+    if not raw_text:
+        payload = call_openai_compatible_chat(
+            base_url=config.base_url,
+            api_key=api_key,
+            model=config.review_model,
+            messages=[
+                {"role": "system", "content": LLM_REVIEW_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            timeout=config.timeout,
+        )
+        raw_text = _extract_chat_content(payload)
+    parsed = parse_llm_review_response(raw_text)
     if parsed.get("status") == "failed":
-        return {"status": "failed", "reason": str(parsed.get("reason", "invalid_json")), "probe": probe}
+        parsed = {
+            "llm_review_version": "4.0",
+            "overall_result": "needs_manual_review",
+            "overall_risk": "medium",
+            "issues": [],
+            "manual_review_items": [],
+            "safe_edit_plan": [],
+            "notes": [],
+            "raw_text": raw_text,
+        }
 
     basis = parsed.get("basis")
     if not isinstance(basis, dict):
         basis = {}
         parsed["basis"] = basis
-    basis["uses_spec_docx"] = bool(candidates.get("spec_text")) or upload_ok
+    basis["uses_spec_docx"] = bool(candidates.get("spec_text")) or bool(probe.get("supported"))
     basis["uses_fixed_docx"] = True
     basis.setdefault("uses_rendered_images", False)
     basis["document_upload_status"] = "ok" if upload_ok else "fallback_text"
@@ -5391,7 +5443,7 @@ def run_qwen_docx_review(*, config: LLMReviewConfig, api_key: str, candidates: d
 
     parsed.setdefault("llm_review_version", "4.0")
     parsed.setdefault("provider", config.provider)
-    parsed.setdefault("model", config.model)
+    parsed.setdefault("model", config.doc_model if upload_ok else config.review_model)
     parsed.setdefault("overall_result", "needs_manual_review")
     parsed.setdefault("overall_risk", "medium")
     parsed.setdefault("issues", [])
@@ -5410,7 +5462,7 @@ def run_llm_review(config: LLMReviewConfig, candidates: dict[str, object], doten
         return {
             "enabled": True,
             "provider": config.provider,
-            "model": config.model,
+            "model": config.doc_model,
             "mode": config.mode,
             "base_url": config.base_url,
             "status": "skipped",
@@ -5422,7 +5474,7 @@ def run_llm_review(config: LLMReviewConfig, candidates: dict[str, object], doten
             return {
                 "enabled": True,
                 "provider": config.provider,
-                "model": config.model,
+                "model": config.doc_model,
                 "mode": config.mode,
                 "base_url": config.base_url,
                 "status": "failed",
@@ -5432,7 +5484,7 @@ def run_llm_review(config: LLMReviewConfig, candidates: dict[str, object], doten
         response = {
             "enabled": True,
             "provider": config.provider,
-            "model": config.model,
+            "model": config.doc_model,
             "mode": config.mode,
             "base_url": config.base_url,
             "status": "ok",
@@ -5679,11 +5731,16 @@ def main() -> int:
     parser.add_argument("--llm-review", action="store_true", help="Enable LLM high-risk format review.")
     parser.add_argument("--llm-provider", default=None, help="LLM provider name, default dashscope.")
     parser.add_argument("--llm-model", default=None, help="LLM model name, default qwen3.6-plus.")
+    parser.add_argument("--llm-review-model", default=None, help="LLM review model name, default qwen3.6-plus.")
+    parser.add_argument("--llm-doc-model", default=None, help="LLM doc understanding model, default qwen-long.")
     parser.add_argument("--llm-api-key-env", default="DASHSCOPE_API_KEY", help="Environment variable name for API key.")
     parser.add_argument("--llm-base-url", default=None, help="OpenAI-compatible base URL.")
     parser.add_argument("--llm-review-mode", choices=["auto", "text", "vision"], default="auto", help="LLM review mode.")
     parser.add_argument("--llm-review-max-pages", type=int, default=8, help="Max candidate item count for review.")
     parser.add_argument("--llm-review-spec-docx", default=None, help="Spec DOCX path for LLM review.")
+    parser.add_argument("--llm-review-spec-file-id", default=None, help="Spec DOCX file-id for LLM review.")
+    parser.add_argument("--llm-review-upload-target-docx", action="store_true", default=True, help="Upload target docx for doc review.")
+    parser.add_argument("--llm-review-delete-uploaded-target-after-review", action="store_true", help="Delete uploaded target docx after review.")
     parser.add_argument("--llm-review-all-pages", action="store_true", help="Use all rendered after pages for LLM review.")
     parser.add_argument("--llm-review-batch-size", type=int, default=6, help="Rendered image batch size for LLM review.")
     parser.add_argument("--llm-review-image-upload", action="store_true", default=True, help="Enable direct image upload for LLM review.")
