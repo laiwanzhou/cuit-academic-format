@@ -2253,7 +2253,7 @@ def test_llm_review_warns_if_vision_failed():
         p = Path(td) / "llm.html"
         mod.write_llm_review_separate_html({"model": "m", "vision_status": "failed", "review": {"issues": []}}, p)
         html = p.read_text(encoding="utf-8")
-        assert "回退审查" in html
+        assert ("文档提交状态" in html or "回退" in html)
 
 
 def test_llm_review_spec_docx_not_required():

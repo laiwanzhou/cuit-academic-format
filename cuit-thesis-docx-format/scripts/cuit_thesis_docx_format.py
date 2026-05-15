@@ -4813,30 +4813,56 @@ def _first_non_empty(mapping: dict, keys: list[str], default: str = "") -> str:
     return default
 
 
+
+
+def _short_text(value: object, max_len: int = 60) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"[\r\n]+", " ", text).strip()
+    if len(text) > max_len:
+        return text[:max_len] + "……"
+    return text
+
+
+
+
+def _short_text(value: object, max_len: int = 60) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"[\r\n]+", " ", text).strip()
+    if len(text) > max_len:
+        return text[:max_len] + "……"
+    return text
+
+
 def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) -> None:
     def _normalize_llm_issue_row(item: object, index: int) -> dict[str, str]:
         if isinstance(item, dict):
             return {
                 "id": _first_non_empty(item, ["id"], str(index)),
-                "page": _zh_page(_first_non_empty(item, ["page"], "unknown")),
                 "type": _zh_issue_type(_first_non_empty(item, ["type", "issue_type", "category"], "text_verified")),
+                "original_type": _first_non_empty(item, ["type"], ""),
                 "severity": _first_non_empty(item, ["severity"], ""),
-                "evidence": _first_non_empty(item, ["evidence_exact_quote", "evidence_text", "related_evidence", "evidence", "target_hint"], ""),
-                "description": _first_non_empty(item, ["description", "reason", "claim", "message", "text"], ""),
+                "location_hint": _first_non_empty(item, ["location_hint"], ""),
+                "confidence": _first_non_empty(item, ["confidence"], ""),
+                "evidence_exact_quote": _first_non_empty(item, ["evidence_exact_quote", "evidence_text"], ""),
+                "evidence_summary": _short_text(_first_non_empty(item, ["evidence_exact_quote", "evidence_text"], ""), 50),
                 "spec_basis": _first_non_empty(item, ["spec_basis", "basis"], ""),
                 "suggestion": _first_non_empty(item, ["suggestion", "recommendation", "action", "advice"], ""),
-                "source": _first_non_empty(item, ["source", "verification_method"], ""),
+                "suggestion_summary": _short_text(_first_non_empty(item, ["suggestion", "recommendation", "action", "advice"], ""), 60),
             }
         return {
             "id": str(index),
-            "page": "unknown",
             "type": "text_verified",
+            "original_type": "",
             "severity": "",
-            "evidence": str(item),
-            "description": str(item),
+            "location_hint": "",
+            "confidence": "",
+            "evidence_exact_quote": str(item),
+            "evidence_summary": _short_text(str(item), 50),
             "spec_basis": "",
             "suggestion": "请人工复核该项。",
-            "source": "",
+            "suggestion_summary": "请人工复核。",
         }
 
     def _normalize_layout_row(item: object, index: int) -> dict[str, str]:
@@ -4847,6 +4873,8 @@ def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) ->
                 "reason": _humanize_layout_reason(_first_non_empty(item, ["reason", "description", "suggestion"], "")),
                 "check_method": _first_non_empty(item, ["check_method", "verification_method", "source"], "在 Word/WPS 中打开文档后人工检查"),
                 "risk_level": _zh_value(_first_non_empty(item, ["risk_level", "severity"], "")),
+                "source": _first_non_empty(item, ["source"], ""),
+                "caption": _first_non_empty(item, ["caption"], ""),
             }
         return {
             "id": str(index),
@@ -4854,6 +4882,8 @@ def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) ->
             "reason": "请人工复核。",
             "check_method": "在 Word/WPS 中打开文档后人工检查",
             "risk_level": "",
+            "source": "",
+            "caption": "",
         }
 
     def _normalize_rejected_row(item: object, index: int) -> dict[str, str]:
@@ -4889,64 +4919,120 @@ def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) ->
     debug_warnings = review.get("debug_warnings") if isinstance(review.get("debug_warnings"), list) else []
 
     text_normalized = [_normalize_llm_issue_row(item, idx) for idx, item in enumerate(text_issues, start=1)]
-    text_sorted = sorted(text_normalized, key=lambda x: x.get("page", "unknown"))
-    text_rows = "".join(
-        "<tr>"
-        f"<td>{html.escape(it.get('id', ''))}</td>"
-        f"<td>{html.escape(it.get('page', 'unknown'))}</td>"
-        f"<td>{html.escape(it.get('type', 'other'))}</td>"
-        f"<td>{_zh_value(html.escape(it.get('severity', '')))}</td>"
-        f"<td class=\"prewrap\">{html.escape(it.get('evidence', ''))}</td>"
-        f"<td>{html.escape(it.get('spec_basis', ''))}</td>"
-        f"<td class=\"prewrap\">{html.escape(it.get('suggestion', ''))}</td>"
-        "</tr>"
-        for it in text_sorted
-    )
-    if not text_sorted:
-        text_rows = (
-            "<tr><td colspan=\"7\"><em>"
-            "未发现通过本地证据校验的文本型明确问题。"
-            "</em></td></tr>"
+    layout_normalized = [_normalize_layout_row(item, idx) for idx, item in enumerate(layout_checks, start=1)]
+    rejected_normalized = [_normalize_rejected_row(item, idx) for idx, item in enumerate(rejected_items, start=1)]
+
+    status = str(basis.get("document_upload_status", llm_review.get("document_upload_status", "failed")))
+    fallback_used = bool(basis.get("fallback_used", llm_review.get("fallback_used", False)))
+    fallback_reason = str(basis.get("fallback_reason", llm_review.get("fallback_reason", "")))
+    review_mode = str(basis.get("review_mode", llm_review.get("mode", "")))
+    doc_model_attempted = str(basis.get("doc_model_attempted", llm_review.get("doc_model_attempted", llm_review.get("model", ""))))
+    actual_review_model = str(llm_review.get("actual_review_model", llm_review.get("model", "")))
+    target_source = str(basis.get("target_docx_source", "fixed"))
+    overall = str(review.get("overall_result", ""))
+    risk = str(review.get("overall_risk", ""))
+    raw_json = json.dumps(llm_review, ensure_ascii=False, indent=2)
+
+    # ---- build summary text ----
+    summary_label = "本次 LLM 审查已成功读取规范文件和目标论文"
+    if status != "ok" or fallback_used:
+        summary_label = "本次 LLM 审查使用了回退文本摘要模式，未能直接读取 Word 文档"
+
+    # ---- build fallback detail lines (only shown when fallback) ----
+    fallback_status_lines = ""
+    if status != "ok" or fallback_used:
+        fallback_status_lines = (
+            f"<li><strong>文档提交状态：</strong>{html.escape(_zh_value(status if status else 'failed'))}</li>\n"
+            f"<li><strong>主链路尝试模型：</strong>{html.escape(str(llm_review.get('provider', '')))} / {html.escape(doc_model_attempted)}</li>\n"
+        )
+        if fallback_reason:
+            fallback_status_lines += f"<li><strong>回退原因：</strong>{html.escape(fallback_reason)}</li>\n"
+
+    # ---- toc evidence block ----
+    toc_raw = str(read_check.get("toc_evidence", "") or "")
+    toc_block = ""
+    if toc_raw.strip():
+        toc_block = (
+            "\n<details>\n  <summary>查看目录识别结果</summary>\n"
+            f"  <pre>{html.escape(toc_raw)}</pre>\n"
+            "</details>\n"
         )
 
-    layout_normalized = [_normalize_layout_row(item, idx) for idx, item in enumerate(layout_checks, start=1)]
-    if not layout_normalized:
-        layout_rows = (
-            "<tr><td colspan=\"5\"><em>"
-            "无需要人工复核的版式项目。"
-            "</em></td></tr>"
-        )
-    else:
-        layout_rows = "".join(
+    # ---- text issue summary table rows ----
+    if text_normalized:
+        ts_rows = "".join(
             "<tr>"
             f"<td>{html.escape(it.get('id', ''))}</td>"
-            f"<td class=\"prewrap\">{html.escape(it.get('item', ''))}</td>"
-            f"<td class=\"prewrap\">{html.escape(it.get('reason', ''))}</td>"
-            f"<td>{html.escape(it.get('check_method', ''))}</td>"
+            f"<td>{html.escape(it.get('type', ''))}</td>"
+            f"<td>{html.escape(_zh_value(it.get('severity', '')))}</td>"
+            f"<td>{html.escape(it.get('location_hint', ''))}</td>"
+            f"<td class=\"pre\">{html.escape(it.get('evidence_summary', ''))}</td>"
+            f"<td class=\"pre\">{html.escape(it.get('suggestion_summary', ''))}</td>"
+            "</tr>"
+            for it in text_normalized
+        )
+    else:
+        ts_rows = '<tr><td colspan="6" class="empty-note">未发现通过本地证据校验的文本型明确问题。</td></tr>'
+
+    # ---- text issue detail cards ----
+    detail_cards = ""
+    if text_normalized:
+        cards_parts = []
+        for it in text_normalized:
+            orig_type_html = ""
+            if it.get("original_type") and it["original_type"] != it.get("type", ""):
+                orig_type_html = f'<p class="muted">原始类型：{html.escape(it["original_type"])}</p>\n'
+            card = (
+                '<div class="issue-card">\n'
+                f'<h3>问题 {html.escape(it["id"])}：{html.escape(it["type"])}</h3>\n'
+                f'{orig_type_html}'
+                f'<p><strong>严重度：</strong>{html.escape(_zh_value(it["severity"]))}</p>\n'
+            )
+            if it.get("location_hint"):
+                card += f'<p><strong>位置提示：</strong>{html.escape(it["location_hint"])}</p>\n'
+            if it.get("confidence"):
+                card += f'<p><strong>置信度：</strong>{html.escape(_zh_value(it["confidence"]))}</p>\n'
+            if it.get("evidence_exact_quote"):
+                card += f'<p><strong>论文原文证据：</strong></p>\n<pre>{html.escape(it["evidence_exact_quote"])}</pre>\n'
+            if it.get("spec_basis"):
+                card += f'<p><strong>规范依据：</strong></p>\n<p>{html.escape(it["spec_basis"])}</p>\n'
+            if it.get("suggestion"):
+                card += f'<p><strong>修改建议：</strong></p>\n<p>{html.escape(it["suggestion"])}</p>\n'
+            card += '</div>\n'
+            cards_parts.append(card)
+        detail_cards = "\n".join(cards_parts)
+
+    # ---- layout table rows ----
+    if layout_normalized:
+        lr_rows = "".join(
+            "<tr>"
+            f"<td>{html.escape(it.get('id', ''))}</td>"
+            f"<td class=\"pre\">{html.escape(it.get('item', ''))}</td>"
             f"<td>{html.escape(it.get('risk_level', ''))}</td>"
+            f"<td>{html.escape(it.get('check_method', ''))}</td>"
+            f"<td class=\"pre\">{html.escape(it.get('reason', ''))}</td>"
             "</tr>"
             for it in layout_normalized
         )
-
-    rejected_normalized = [_normalize_rejected_row(item, idx) for idx, item in enumerate(rejected_items, start=1)]
-    if not rejected_normalized:
-        rejected_rows_html = (
-            "<tr><td colspan=\"5\"><em>"
-            "无被过滤的低可信判断。"
-            "</em></td></tr>"
-        )
     else:
-        rejected_rows_html = "".join(
+        lr_rows = '<tr><td colspan="5" class="empty-note">无需要人工复核的版式项目。</td></tr>'
+
+    # ---- rejected rows ----
+    if rejected_normalized:
+        rj_rows = "".join(
             "<tr>"
             f"<td>{html.escape(it.get('id', ''))}</td>"
             f"<td>{html.escape(it.get('category', ''))}</td>"
-            f"<td class=\"prewrap\">{html.escape(it.get('claim', ''))}</td>"
+            f"<td class=\"pre\">{html.escape(it.get('claim', ''))}</td>"
             f"<td>{html.escape(it.get('rejected_reason', ''))}</td>"
-            f"<td class=\"prewrap\">{html.escape(it.get('evidence_attempted', ''))}</td>"
+            f"<td class=\"pre\">{html.escape(it.get('evidence_attempted', ''))}</td>"
             "</tr>"
             for it in rejected_normalized
         )
+    else:
+        rj_rows = '<tr><td colspan="5" class="empty-note">无被过滤的低可信判断。</td></tr>'
 
+    # ---- debug warnings ----
     if debug_warnings:
         debug_rows = "".join(
             "<li>" + html.escape(str(item if not isinstance(item, dict) else item.get("warning", item.get("reason", str(item))))) + "</li>"
@@ -4955,100 +5041,111 @@ def write_llm_review_separate_html(llm_review: dict[str, object], path: Path) ->
     else:
         debug_rows = "<li>无调试信息。</li>"
 
-    status = str(basis.get("document_upload_status", llm_review.get("document_upload_status", "failed")))
-    fallback_used = bool(basis.get("fallback_used", llm_review.get("fallback_used", False)))
-    fallback_reason = str(basis.get("fallback_reason", llm_review.get("fallback_reason", "")))
-    review_mode = str(basis.get("review_mode", llm_review.get("mode", "")))
-    doc_model_attempted = str(basis.get("doc_model_attempted", llm_review.get("doc_model_attempted", llm_review.get("model", ""))))
-    fallback_model = str(basis.get("fallback_model", llm_review.get("fallback_model", "")))
-    actual_review_model = str(llm_review.get("actual_review_model", fallback_model if fallback_used and fallback_model else llm_review.get("model", "")))
-    target_source = str(basis.get("target_docx_source", "fixed"))
-
-    # Build conclusion text
-    overall = str(review.get("overall_result", ""))
-    risk = str(review.get("overall_risk", ""))
-    conclusion_parts = []
-    if review_mode == "qwen_long_fileid_docx" and status == "ok":
-        conclusion_parts.append("本次 LLM 审查已成功读取规范文件和目标论文")
-    elif status != "ok" or fallback_used:
-        conclusion_parts.append("本次 LLM 审查使用了回退文本摘要模式，未能直接读取 Word 文档。")
-    if len(text_sorted) == 0:
-        conclusion_parts.append("未发现通过本地证据校验的文本型明确问题")
-    else:
-        conclusion_parts.append(f"共发现 {len(text_sorted)} 项通过本地证据校验的文本型明确问题")
-    if layout_normalized:
-        conclusion_parts.append(f"有 {len(layout_normalized)} 项需要在 Word/WPS 中人工版式复核")
-    if rejected_normalized:
-        conclusion_parts.append(f"已过滤 {len(rejected_normalized)} 项低可信或未证实判断（不作为问题，仅供调试参考）")
-    conclusion_text = "；".join(conclusion_parts) + "。"
-
-    raw_json = json.dumps(llm_review, ensure_ascii=False, indent=2)
-
+    # ---- build HTML ----
     doc = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <title>LLM 格式审查报告</title>
 <style>
-body {{{{ font-family: "Microsoft YaHei", sans-serif; margin: 24px; line-height: 1.6; }}}}
-table {{{{ border-collapse: collapse; width: 100%; }}}}
-th, td {{{{ border: 1px solid #d1d5db; padding: 6px; vertical-align: top; text-align: left; }}}}
-.warn {{{{ color: #b91c1c; font-weight: 700; }}}}
-td.prewrap {{{{ white-space: pre-wrap; word-break: break-word; }}}}
+body {{{{ font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif; margin: 24px; line-height: 1.7; color: #111827; background: #ffffff; }}}}
+h1, h2, h3 {{{{ color: #111827; }}}}
+.summary-card {{{{ background: #f0f7ff; border-left: 4px solid #3b82f6; padding: 12px 16px; margin: 12px 0 20px 0; border-radius: 6px; }}}}
+.summary-card ul {{{{ margin: 8px 0; padding-left: 20px; }}}}
+.note {{{{ color: #374151; background: #f9fafb; border-left: 4px solid #9ca3af; padding: 8px 12px; margin: 12px 0; }}}}
+.empty-note {{{{ color: #6b7280; background: #f9fafb; padding: 8px 12px; border-radius: 6px; display: block; }}}}
+table {{{{ border-collapse: collapse; width: 100%; table-layout: fixed; margin: 12px 0 20px 0; }}}}
+th, td {{{{ border: 1px solid #d1d5db; padding: 6px 8px; vertical-align: top; word-break: break-word; }}}}
+th {{{{ background: #f3f4f6; font-weight: 600; }}}}
+tr:nth-child(even) td {{{{ background: #f9fafb; }}}}
+.issue-card {{{{ border: 1px solid #d1d5db; border-radius: 8px; padding: 12px 16px; margin: 14px 0; background: #ffffff; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}}}
+.issue-card h3 {{{{ margin-top: 0; }}}}
+pre, .pre {{{{ white-space: pre-wrap; word-break: break-word; background: #f9fafb; padding: 8px; border-radius: 6px; border: 1px solid #e5e7eb; font-family: inherit; }}}}
+.muted {{{{ color: #6b7280; font-size: 0.92em; }}}}
+details {{{{ margin: 16px 0; padding: 8px 12px; border: 1px solid #e5e7eb; border-radius: 6px; background: #fafafa; }}}}
+summary {{{{ cursor: pointer; font-weight: 600; }}}}
 </style>
 </head>
 <body>
 <h1>LLM 格式审查报告</h1>
 <p>该报告由千问根据格式指导书和目标论文生成，仅供人工复核；不会自动执行修改。</p>
 
+<!-- ====== 1. Summary Card ====== -->
+<div class="summary-card">
 <h2>审查结论</h2>
-<blockquote style="background:#f0f7ff;padding:12px 16px;border-left:4px solid #3b82f6;margin:8px 0;">
-<p><strong>{html.escape(conclusion_text)}</strong></p>
-</blockquote>
+<p>{html.escape(summary_label)}</p>
+<ul>
+{fallback_status_lines}<li><strong>总体结论：</strong>{html.escape(_zh_value(overall))}</li>
+<li><strong>总体风险：</strong>{html.escape(_zh_value(risk))}</li>
+<li><strong>文本证据明确问题：</strong>{len(text_normalized)} 项</li>
+<li><strong>人工版式复核：</strong>{len(layout_normalized)} 项</li>
+<li><strong>已过滤低可信判断：</strong>{len(rejected_normalized)} 项</li>
+<li><strong>审查对象：</strong>{html.escape(_zh_value(target_source))}</li>
+<li><strong>实际审查模型：</strong>{html.escape(actual_review_model)}</li>
+</ul>
+</div>
 
-<p><strong>主链路尝试模型：</strong>{html.escape(str(llm_review.get("provider", "")))} / {html.escape(doc_model_attempted)}</p>
-<p><strong>实际审查模型：</strong>{html.escape(str(llm_review.get("provider", "")))} / {html.escape(actual_review_model)}</p>
-<p><strong>审查模式：</strong>{html.escape(_zh_value(review_mode))}</p>
-<p><strong>审查对象：</strong>{html.escape(_zh_value(target_source))}</p>
-<p><strong>是否使用规范文件：</strong>{html.escape(_zh_bool(basis.get("uses_spec_docx", llm_review.get("uses_spec_docx", False))))}</p>
-<p><strong>是否使用目标论文：</strong>{html.escape(_zh_bool(basis.get("uses_target_docx", basis.get("uses_fixed_docx", llm_review.get("uses_fixed_docx", False)))))}</p>
-<p><strong>文档提交状态：</strong>{html.escape(_zh_value(status if status else "failed"))}</p>
-<p><strong>是否使用回退审查：</strong>{html.escape(_zh_bool(fallback_used))}</p>
-<p><strong>回退原因：</strong>{html.escape(fallback_reason)}</p>
-<p><strong>总体结论：</strong>{html.escape(_zh_value(overall))}</p>
-<p><strong>总体风险：</strong>{html.escape(_zh_value(risk))}</p>
-<p><strong>文本证据明确问题数量：</strong>{len(text_sorted)}</p>
-<p><strong>人工版式复核项目数量：</strong>{len(layout_normalized)}</p>
-<p><strong>已过滤低可信判断数量：</strong>{len(rejected_normalized)}</p>
-
-<h2>读取验证</h2>
-<table><tbody>
-<tr><th>规范文件已读取</th><td>{html.escape(_zh_bool(read_check.get("spec_file_read", basis.get("spec_file_read", False))))}</td></tr>
-<tr><th>目标论文已读取</th><td>{html.escape(_zh_bool(read_check.get("target_file_read", basis.get("target_file_read", False))))}</td></tr>
-<tr><th>论文标题</th><td>{html.escape(str(read_check.get("title", "")))}</td></tr>
+<!-- ====== 2. Read Check Table ====== -->
+<h2>文档读取信息</h2>
+<table>
+<colgroup><col style="width:25%"><col style="width:75%"></colgroup>
+<tbody>
+<tr><th>是否读取规范文件</th><td>{html.escape(_zh_bool(read_check.get("spec_file_read", basis.get("spec_file_read", False))))}</td></tr>
+<tr><th>是否读取论文文件</th><td>{html.escape(_zh_bool(read_check.get("target_file_read", basis.get("target_file_read", False))))}</td></tr>
+<tr><th>论文题目</th><td>{html.escape(str(read_check.get("title", "")))}</td></tr>
 <tr><th>关键词</th><td>{html.escape(_zh_join_list(read_check.get("keywords", "")))}</td></tr>
-<tr><th>目录证据</th><td>{html.escape(str(read_check.get("toc_evidence", "")))}</td></tr>
-<tr><th>参考文献编号观察</th><td>{html.escape(str(read_check.get("reference_numbering_observation", "")))}</td></tr>
+<tr><th>参考文献编号观察</th><td class="pre">{html.escape(str(read_check.get("reference_numbering_observation", "")))}</td></tr>
 </tbody></table>
+{toc_block}
 
+<!-- ====== 3. Text Issue Summary Table ====== -->
 <h2>文本证据明确问题</h2>
-<p><em>说明：以下问题都经过了本地证据校验，论文原文证据在论文中可以找到。</em></p>
-<table><thead><tr><th>序号</th><th>页码</th><th>类型</th><th>严重度</th><th>论文原文证据</th><th>规范依据</th><th>修改建议</th></tr></thead><tbody>{text_rows}</tbody></table>
+<p class="note">以下问题都经过了本地证据校验，论文原文证据在论文中可以找到。</p>
+<table>
+<colgroup>
+<col style="width:6%"><col style="width:18%"><col style="width:8%"><col style="width:18%"><col style="width:24%"><col style="width:26%">
+</colgroup>
+<thead><tr><th>序号</th><th>类型</th><th>严重度</th><th>位置提示</th><th>论文原文证据摘要</th><th>修改建议摘要</th></tr></thead>
+<tbody>{ts_rows}</tbody>
+</table>
 
+<!-- ====== 4. Text Issue Detail Cards ====== -->
+<h2>文本证据明确问题详情</h2>
+{detail_cards if detail_cards else '<p class="empty-note">无详情。</p>'}
+
+<!-- ====== 5. Manual Layout Checks ====== -->
 <h2>需要人工版式复核</h2>
-<p><em>说明：涉及页眉页脚、页码域、目录域、分节符、字体字号、图片位置、三线表等 Word 版式内容，需要在实际 Word 文档中人工检查。这些项目不会自动修改。</em></p>
-<table><thead><tr><th>序号</th><th>项目</th><th>原因</th><th>检查方式</th><th>风险等级</th></tr></thead><tbody>{layout_rows}</tbody></table>
+<p class="note">以下项目涉及 Word/WPS 渲染、页眉页脚、页码域、目录域、表格边框、图片位置或字体字号等内容，系统不会自动修改，需要人工打开文档核对。</p>
+<table>
+<colgroup>
+<col style="width:5%"><col style="width:22%"><col style="width:8%"><col style="width:35%"><col style="width:30%">
+</colgroup>
+<thead><tr><th>序号</th><th>项目</th><th>风险等级</th><th>检查方式</th><th>说明</th></tr></thead>
+<tbody>{lr_rows}</tbody>
+</table>
 
-<details><summary>已过滤的低可信判断（{len(rejected_normalized)} 项，调试用）</summary>
-<p><em>说明：LLM 提出的以下断言因缺少论文原文证据、证据未在本地文档中找到、或超出格式审查范围而被移至此处。这些项目不作为格式问题展示，仅供调试参考。</em></p>
-<table><thead><tr><th>序号</th><th>分类</th><th>判断内容</th><th>过滤原因</th><th>尝试使用的证据</th></tr></thead><tbody>{rejected_rows_html}</tbody></table>
+<!-- ====== 6. Rejected Claims (folded) ====== -->
+<details>
+<summary>已过滤的低可信判断（{len(rejected_normalized)} 项，调试用）</summary>
+<p class="note">LLM 提出的以下断言因缺少论文原文证据、证据未在本地文档中找到、或超出格式审查范围而被移至此处。这些项目不作为格式问题展示，仅供调试参考。</p>
+<table>
+<colgroup>
+<col style="width:5%"><col style="width:12%"><col style="width:28%"><col style="width:25%"><col style="width:30%">
+</colgroup>
+<thead><tr><th>序号</th><th>分类</th><th>判断内容</th><th>过滤原因</th><th>尝试使用的证据</th></tr></thead>
+<tbody>{rj_rows}</tbody>
+</table>
 </details>
 
-<details><summary>调试信息（默认折叠）</summary>
-<ul class="warn">{debug_rows}</ul>
+<!-- ====== 7. Debug Warnings (folded) ====== -->
+<details>
+<summary>调试信息</summary>
+<ul>{debug_rows}</ul>
 </details>
 
-<details><summary>完整 JSON（调试用）</summary>
+<!-- ====== 8. Full JSON (folded) ====== -->
+<details>
+<summary>完整 JSON（调试用）</summary>
 <pre>{html.escape(raw_json)}</pre>
 </details>
 </body>
@@ -5794,6 +5891,13 @@ def _zh_issue_type(value: object) -> str:
         "invalid_subsection_numbering": "小节编号不规范",
         "missing_space_in_figure_caption": "图题编号与文字间距异常",
         "missing_space_in_table_caption": "表题编号与文字间距异常",
+        "title_format_error": "标题格式不规范",
+        "toc_consistency": "目录与正文标题一致性",
+        "title_format_error": "标题格式不规范",
+        "figure_caption_format_error": "图题格式不规范",
+        "table_caption_format_error": "表题格式不规范",
+        "table_caption_duplicate": "表题重复或编号异常",
+        "inconsistent_title_case": "标题大小写不一致",
     }
     s = str(value)
     mapped = mapping.get(s)

@@ -904,7 +904,7 @@ class ManualReviewItemsFieldCompatibilityTests(unittest.TestCase):
                 html_path,
             )
             html_text = html_path.read_text(encoding="utf-8")
-            self.assertIn("需要在实际 Word 文档中人工检查", html_text)
+            self.assertIn("需要人工打开文档核对", html_text)
             self.assertIn("不会自动执行修改", html_text)
 
 
@@ -989,13 +989,15 @@ class LLMReportQualityTests(unittest.TestCase):
             html_text = html_path.read_text(encoding="utf-8")
             # The Chinese label should appear
             self.assertIn("标题编号或标题格式不规范", html_text)
-            # But BEFORE the foldable JSON section, raw English type should not appear
-            # Split at the first <details> to get the visible body
-            body = html_text.split("<details>")[0]
-            self.assertNotIn("incorrect_title_format", body)
-            self.assertNotIn("missing_figure_caption_format", body)
-            self.assertNotIn("missing_table_caption_format", body)
-            self.assertNotIn("inconsistent_chapter_title", body)
+            # The detail card shows original_type in muted style - this is intentional
+            self.assertIn("原始类型", html_text)
+            # But the summary table should not show raw English type
+            # Split at the detail cards section to check the summary table area
+            body_before_cards = html_text.split("文本证据明确问题详情")[0]
+            self.assertNotIn("incorrect_title_format", body_before_cards)
+            self.assertNotIn("missing_figure_caption_format", body_before_cards)
+            self.assertNotIn("missing_table_caption_format", body_before_cards)
+            self.assertNotIn("inconsistent_chapter_title", body_before_cards)
 
     # ---- Evidence page matching tests ----
 
@@ -1202,6 +1204,7 @@ class LLMReportQualityTests(unittest.TestCase):
             # Split before the first <details> (which contains the foldable JSON section)
             body = html_text.split("<details>")[0]
             # These English field names should NOT appear in the visible body
+            # (except in muted debug notes intentionally showing original_type)
             forbidden = [
                 "review_mode",
                 "target_docx_source",
@@ -1216,6 +1219,8 @@ class LLMReportQualityTests(unittest.TestCase):
                 "read_check",
                 "evidence_exact_quote",
                 "spec_basis",
+                "page_match_source",
+                "page_match_mode",
             ]
             for term in forbidden:
                 self.assertNotIn(term, body, f"HTML visible body must not contain '{term}'")
@@ -1226,10 +1231,10 @@ class LLMReportQualityTests(unittest.TestCase):
             self.assertNotIn("low", body)
             # But Chinese equivalents should appear
             self.assertIn("审查结论", body)
-            self.assertIn("审查模式", body)
-            self.assertIn("是否使用回退审查", body)
+            self.assertIn("审查对象", body)
             self.assertIn("总体结论", body)
             self.assertIn("总体风险", body)
+            self.assertIn("文档读取信息", body)
             self.assertIn("低", body)
             self.assertIn("是", body)
             self.assertIn("否", body)
