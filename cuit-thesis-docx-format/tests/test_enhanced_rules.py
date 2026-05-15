@@ -1216,7 +1216,79 @@ def test_find_header_start_section_prefers_abstract_toc_body_regions():
     mod.analyze_section_sequence = lambda texts, has_toc_field=False: {"regions": regions}
     start, reason = mod.find_header_start_section(doc)
     assert start is not None
-    assert reason in {"abstract-or-later", "fallback-second-section"}
+    assert reason in {"declaration-or-later", "fallback-second-section"}
+
+
+def test_page_header_starts_from_declaration_section():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("封面标题")
+    doc.add_section(WD_SECTION_START.NEW_PAGE)
+    doc.add_paragraph("声 明")
+    doc.add_paragraph("本人声明……")
+    doc.add_section(WD_SECTION_START.NEW_PAGE)
+    doc.add_paragraph("摘 要")
+    doc.add_paragraph("摘要正文。")
+    doc.add_section(WD_SECTION_START.NEW_PAGE)
+    doc.add_paragraph("第一章 绪论")
+    doc.add_paragraph("正文内容。")
+    texts = [mod.paragraph_text(p) for p in doc.paragraphs]
+    mocked_regions = []
+    for text in texts:
+        t = text.strip()
+        if "声明" in t or "声 明" in t:
+            mocked_regions.append("declaration")
+        elif "摘 要" in t or "摘要" in t:
+            mocked_regions.append("abstract_zh")
+        elif "绪论" in t:
+            mocked_regions.append("body")
+        else:
+            mocked_regions.append("cover")
+    mod.analyze_section_sequence = lambda _texts, has_toc_field=False: {"regions": mocked_regions}
+    mod.apply_cuit_page_headers(doc, allow_layout_fixes=True)
+
+    declaration_idx = _section_idx_contains_text(mod, doc, "声 明")
+    abstract_idx = _section_idx_contains_text(mod, doc, "摘 要")
+    body_idx = _section_idx_contains_text(mod, doc, "第一章 绪论")
+
+    assert "成都信息工程大学学士学位论文" not in _header_text(doc.sections[0], mod)
+    for idx in (declaration_idx, abstract_idx, body_idx):
+        assert "成都信息工程大学学士学位论文" in _header_text(doc.sections[idx], mod)
+        para = doc.sections[idx].header.paragraphs[0]
+        run = para.runs[0]
+        assert para.alignment == mod.WD_ALIGN_PARAGRAPH.CENTER
+        assert run.font.size is not None and abs(run.font.size.pt - 9.0) < 0.1
+        assert run._element.rPr is not None and run._element.rPr.rFonts is not None
+        assert run._element.rPr.rFonts.get(mod.qn("w:eastAsia")) == "宋体"
+        assert run._element.rPr.rFonts.get(mod.qn("w:ascii")) == "Times New Roman"
+        assert run._element.rPr.rFonts.get(mod.qn("w:hAnsi")) == "Times New Roman"
+
+
+def test_page_header_without_declaration_starts_from_abstract():
+    mod = load_module()
+    doc = mod.Document()
+    doc.add_paragraph("封面标题")
+    doc.add_section(WD_SECTION_START.NEW_PAGE)
+    doc.add_paragraph("摘 要")
+    doc.add_paragraph("摘要正文")
+    doc.add_section(WD_SECTION_START.NEW_PAGE)
+    doc.add_paragraph("1 引 言")
+    doc.add_paragraph("正文")
+    mod.apply_cuit_page_headers(doc, allow_layout_fixes=True)
+
+    abstract_idx = _section_idx_contains_text(mod, doc, "摘 要")
+    body_idx = _section_idx_contains_text(mod, doc, "1 引 言")
+    assert "成都信息工程大学学士学位论文" not in _header_text(doc.sections[0], mod)
+    assert "成都信息工程大学学士学位论文" in _header_text(doc.sections[abstract_idx], mod)
+    assert "成都信息工程大学学士学位论文" in _header_text(doc.sections[body_idx], mod)
+
+
+def test_page_setup_writes_header_when_layout_fixes_disabled():
+    mod = load_module()
+    doc = _build_header_sections_doc(mod)
+    mod.apply_page_setup(doc, allow_layout_fixes=False)
+    abstract_idx = _section_idx_contains_text(mod, doc, "摘 要")
+    assert "成都信息工程大学学士学位论文" in _header_text(doc.sections[abstract_idx], mod)
 
 
 def test_remove_blank_between_english_keywords_and_toc():

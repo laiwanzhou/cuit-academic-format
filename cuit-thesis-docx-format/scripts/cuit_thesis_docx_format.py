@@ -1383,13 +1383,22 @@ def find_header_start_section(document: Document) -> tuple[int | None, str]:
     texts = [paragraph_text(paragraph) for paragraph in document.paragraphs]
     regions = analyze_section_sequence(texts, has_toc_field=document_has_toc_field(document))["regions"]
     ranges = section_paragraph_ranges(document)
-    target_regions = {"abstract_zh", "abstract_en", "toc", "body"}
+    target_regions = {
+        "declaration",
+        "abstract_zh",
+        "abstract_en",
+        "toc",
+        "body",
+        "references",
+        "appendix",
+        "acknowledgement",
+    }
     for idx, (start, end) in enumerate(ranges):
         if start > end:
             continue
         section_regions = set(regions[start : end + 1])
         if section_regions & target_regions:
-            return idx, "abstract-or-later"
+            return idx, "declaration-or-later"
     if len(document.sections) >= 2:
         return 1, "fallback-second-section"
     return None, "not-found"
@@ -1400,34 +1409,35 @@ def clear_header(header) -> None:
         paragraph.clear()
 
 
+def _write_cuit_header(header) -> None:
+    clear_header(header)
+    para = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+    para.clear()
+    run = para.add_run("成都信息工程大学学士学位论文")
+    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run.font.name = "Times New Roman"
+    run.bold = False
+    run.italic = False
+    if run._element.rPr is None:
+        run._element.get_or_add_rPr()
+    run._element.rPr.rFonts.set(qn("w:ascii"), "Times New Roman")
+    run._element.rPr.rFonts.set(qn("w:hAnsi"), "Times New Roman")
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "宋体")
+    run.font.size = Pt(9)
+
+
 def apply_header(section, enabled: bool) -> None:
     section.different_first_page_header_footer = False
     section.header.is_linked_to_previous = False
     section.first_page_header.is_linked_to_previous = False
     section.even_page_header.is_linked_to_previous = False
+    targets = [section.header, section.first_page_header, section.even_page_header]
     if not enabled:
-        clear_header(section.header)
-        clear_header(section.first_page_header)
-        clear_header(section.even_page_header)
+        for header in targets:
+            clear_header(header)
         return
-    header_text = "成都信息工程大学学士学位论文"
-    para = None
-    for candidate in section.header.paragraphs:
-        if paragraph_text(candidate).strip() == header_text:
-            para = candidate
-            break
-    if para is None:
-        para = section.header.paragraphs[0] if section.header.paragraphs else section.header.add_paragraph()
-    para.text = header_text
-    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    for run in para.runs:
-        run.font.name = "Times New Roman"
-        if run._element.rPr is None:
-            run._element.get_or_add_rPr()
-        run._element.rPr.rFonts.set(qn("w:ascii"), "Times New Roman")
-        run._element.rPr.rFonts.set(qn("w:hAnsi"), "Times New Roman")
-        run._element.rPr.rFonts.set(qn("w:eastAsia"), "宋体")
-        run.font.size = Pt(9)
+    for header in targets:
+        _write_cuit_header(header)
 
 
 def apply_cuit_page_headers(document: Document, allow_layout_fixes: bool) -> str:
@@ -2292,9 +2302,10 @@ def apply_page_setup(document: Document, allow_layout_fixes: bool) -> None:
         section.right_margin = Cm(3)
         if allow_layout_fixes:
             section.header_distance = Cm(1.5)
+    apply_cuit_page_headers(document, allow_layout_fixes=True)
     if allow_layout_fixes:
-        apply_cuit_page_headers(document, allow_layout_fixes=allow_layout_fixes)
         # TOC new-page handling is report-only to avoid page-break regressions on hidden TOC placeholders.
+        pass
 
 
 def _section_format(section) -> str:
